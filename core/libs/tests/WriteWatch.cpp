@@ -557,6 +557,29 @@ void CheckReadTrap() {
     ::alarm(0);
 }
 
+void CheckReadTrapTrim() {
+    ::alarm(90);
+    constexpr std::size_t Pages = 9000;
+    Region region(Pages);
+    GuestWriteWatchRegister_nid_postfix(region.base, region.bytes);
+    Require(region.Collect() == All(Pages), "a new range is not reported in full");
+    Traps().fill = 0x3c;
+    Require(GuestWriteWatchSetReadTrapResolver_nid_postfix(&ResolveTrap), "cannot set the read trap resolver");
+    for (std::size_t index = 0; index < Pages; ++index) {
+        Require(GuestWriteWatchTrapReads_nid_postfix(region.Address(index), region.page), "cannot set a read trap");
+        GuestWriteWatchReleaseReads_nid_postfix(region.Address(index), region.page);
+    }
+    Require(GuestWriteWatchTrapReads_nid_postfix(region.Address(0), region.page), "cannot set a read trap after the page records were trimmed");
+    Require(ReadOnThread(region.base) == 0x3c, "a trapped read after the page records were trimmed does not see the resolver's bytes");
+    Require(TakeTrapCalls() == std::vector<std::pair<std::uintptr_t, std::uintptr_t>>{{region.Address(0), region.Address(1)}}, "a trapped read after the page records were trimmed does not resolve its range exactly once");
+    GuestWriteWatchReleaseReads_nid_postfix(region.Address(0), region.page);
+    static_cast<void>(region.Collect());
+    region.base[5 * region.page] = 7;
+    Require(region.Collect() == std::set<std::size_t>({5}), "a write after the page records were trimmed is not reported exactly");
+    GuestWriteWatchUnregister_nid_postfix(region.base, region.bytes);
+    ::alarm(0);
+}
+
 void CheckReadTrapFaults() {
     const auto bytes = static_cast<std::size_t>(::getpagesize());
     for (const bool resolved : {false, true}) {
@@ -1071,6 +1094,7 @@ int main(int argc, char** argv) {
         else if (mode == "read-trap-threads") CheckReadTrapThreads();
         else if (mode == "read-trap-holder") CheckReadTrapHolder();
         else if (mode == "read-trap-fault") CheckReadTrapFaults();
+        else if (mode == "read-trap-trim") CheckReadTrapTrim();
         else if (mode == "read-trap-late") CheckReadTrapLateFaults();
 #if defined(__APPLE__)
         else if (mode == "read-trap-fault-bound") CheckReadTrapFaultBound();

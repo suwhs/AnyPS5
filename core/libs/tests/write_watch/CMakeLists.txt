@@ -44,4 +44,12 @@ else()
         add_test(NAME write_watch_${mode} COMMAND write_watch_tests ${mode})
         set_tests_properties(write_watch_${mode} PROPERTIES TIMEOUT 30)
     endforeach()
+
+    foreach(mode read-trap read-trap-late)
+        add_test(NAME write_watch_${mode}-tiny-limit COMMAND write_watch_tests ${mode})
+        set_tests_properties(write_watch_${mode}-tiny-limit PROPERTIES TIMEOUT 30 ENVIRONMENT APS5_WRITE_WATCH_PAGE_STATE_LIMIT=1)
+    endforeach()
+
+    add_test(NAME write_watch_read-trap-trim COMMAND write_watch_tests read-trap-trim)
+    set_tests_properties(write_watch_read-trap-trim PROPERTIES TIMEOUT 120 ENVIRONMENT APS5_WRITE_WATCH_PAGE_STATE_LIMIT=1)
 endif()

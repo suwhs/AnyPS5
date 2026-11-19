@@ -236,6 +236,7 @@ public:
         _traps.emplace(begin, end);
         for (auto page = first; page < last; page += PageBytes) _pageState[page] = static_cast<std::uint8_t>(_pageState[page] | TrapReadTrapped);
         _trapping.store(true, std::memory_order_release);
+        trimPageState();
         return true;
     }
 
@@ -274,7 +275,7 @@ public:
             _hostWrites.emplace_back(first, last);
             for (auto it = _pageState.lower_bound(first); it != _pageState.end() && it->first < last; ++it) {
                 if ((it->second & TrapReadTrapped) == 0) continue;
-                it->second = static_cast<std::uint8_t>(it->second & ~TrapReadTrapped);
+                it->second = UntrappedState(it->second);
                 ::mprotect(reinterpret_cast<void*>(it->first), PageBytes, static_cast<int>((it->second & TrapProtectionMask) | PROT_WRITE));
             }
         });
@@ -483,6 +484,7 @@ private:
 private:
     Watch() {
         _pid = ::getpid();
+        if (const char* limit = std::getenv("APS5_WRITE_WATCH_PAGE_STATE_LIMIT")) _pageStateLimit = std::strtoul(limit, nullptr, 0);
         if (std::getenv("APS5_NO_WRITE_WATCH") == nullptr) open();
     }
 
@@ -632,8 +634,12 @@ private:
     std::uintptr_t _linkBytes = 0;
 
     static constexpr std::uint8_t TrapProtectionMask = PROT_READ | PROT_WRITE | PROT_EXEC;
+    static constexpr std::uint8_t TrapAgeMask = 0x38;
+    static constexpr unsigned TrapAgeShift = 3;
     static constexpr std::uint8_t TrapRecorded = 0x40;
     static constexpr std::uint8_t TrapReadTrapped = 0x80;
+    static constexpr unsigned TrapAgeBucketShift = 12;
+    static constexpr std::size_t PageStateLimit = 1 << 16;
     static constexpr std::size_t ResolveSlots = 32;
     static constexpr std::size_t ResolvingCapacity = 4096;
     static constexpr std::size_t RetrySlots = 64;
@@ -808,6 +814,26 @@ private:
         });
     }
 
+    static std::uint8_t TrapAgeBucket(std::uint64_t generation) {
+        return static_cast<std::uint8_t>(((generation >> TrapAgeBucketShift) & 7u) << TrapAgeShift);
+    }
+
+    std::uint8_t UntrappedState(std::uint8_t state) {
+        return static_cast<std::uint8_t>((state & ~(TrapReadTrapped | TrapAgeMask)) | TrapAgeBucket(_untrapGeneration));
+    }
+
+    void trimPageState() {
+        if (_pageState.size() <= _pageStateLimit) return;
+        const auto current = TrapAgeBucket(_untrapGeneration);
+        for (auto it = _pageState.begin(); it != _pageState.end();) {
+            if ((it->second & TrapReadTrapped) != 0 || (it->second & TrapAgeMask) == current) {
+                ++it;
+                continue;
+            }
+            it = _pageState.erase(it);
+        }
+    }
+
     bool retryUntrapped(std::uintptr_t page, std::uint8_t state, bool write) {
         if ((state & TrapProtectionMask & static_cast<std::uint8_t>(write ? PROT_WRITE : PROT_READ)) == 0) return false;
         if (_retryGeneration != _untrapGeneration) {
@@ -835,7 +861,7 @@ private:
             const auto bypass = _bypass.load(std::memory_order_acquire);
             if (own || (bypass != nullptr && bypass()) || (!trapCovers(page, page + PageBytes) && !resolvingCovers(page, page + PageBytes, Owner::Any))) {
                 if (own) deferCovering(page);
-                found->second = static_cast<std::uint8_t>(found->second & ~TrapReadTrapped);
+                found->second = UntrappedState(found->second);
                 ++_untrapGeneration;
                 return ::mprotect(reinterpret_cast<void*>(page), PageBytes, static_cast<int>(found->second & TrapProtectionMask)) == 0;
             }
@@ -871,7 +897,7 @@ private:
             const TrapLock lock(_trapLock);
             if (trapCovers(pageStart(begin), pageEnd(end)) || resolvingCovers(pageStart(begin), pageEnd(end), Owner::Others)) continue;
             if (restore) untrap(begin, end);
-            else for (auto it = _pageState.lower_bound(pageStart(begin)); it != _pageState.end() && it->first < pageEnd(end); ++it) it->second = static_cast<std::uint8_t>(it->second & ~TrapReadTrapped);
+            else for (auto it = _pageState.lower_bound(pageStart(begin)); it != _pageState.end() && it->first < pageEnd(end); ++it) it->second = UntrappedState(it->second);
             return function();
         }
     }
@@ -908,10 +934,11 @@ private:
             const auto page = it->first;
             if (trapCovers(page, page + PageBytes)) continue;
             if (resolvingCovers(page, page + PageBytes, Owner::Others)) continue;
-            it->second = static_cast<std::uint8_t>(it->second & ~TrapReadTrapped);
+            it->second = UntrappedState(it->second);
             ::mprotect(reinterpret_cast<void*>(page), PageBytes, static_cast<int>(it->second & TrapProtectionMask));
             ++_untrapGeneration;
         }
+        trimPageState();
     }
 
     static bool isWriteFault(void* context) {
@@ -987,6 +1014,7 @@ private:
     TrapMutex _trapLock;
     std::multimap<std::uintptr_t, std::uintptr_t> _traps;
     std::map<std::uintptr_t, std::uint8_t> _pageState;
+    std::size_t _pageStateLimit = PageStateLimit;
     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> _hostWrites;
     std::vector<Resolving> _resolving;
     std::vector<Resolving> _deferred;

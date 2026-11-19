@@ -57,8 +57,9 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__)
 #include <unistd.h>
+#define APS5_READ_TRAPS 1
 #endif
 
 namespace AgcDriver::Graphics {
@@ -156,6 +157,13 @@ std::atomic<std::uint64_t> partialUploads{0}, partialUploadBytes{0}, partialWrit
 // writeBackLayers), and pending units a DCC clear -> uncompressed key flip kept as the texels
 // (Refresh).
 std::atomic<std::uint64_t> pretestSkipped{0}, unregisteredDropped{0}, keyFlipKept{0};
+std::atomic<std::uint64_t> refreshCalls{0}, refreshDirectCalls{0}, refreshMultiPassCalls{0}, refreshStoredCalls{0}, refreshStoredBytes{0};
+std::atomic<std::uint64_t> refreshStoredChanged{0}, refreshStoredUnchanged{0}, refreshStoredKeyFlip{0}, refreshWidenedFires{0}, refreshWidenedLayers{0};
+std::atomic<std::uint64_t> refreshKeysChanged{0}, refreshOrderedSkipped{0}, refreshTracked{0}, refreshUntracked{0}, refreshCpuWrote{0}, refreshBlockUnits{0}, refreshCompared{0}, refreshStoredCpuBlock{0};
+std::atomic<std::uint64_t> refreshKeysClear{0}, refreshUploadedUncompressed{0};
+std::atomic<std::uint64_t> wbWholeSurface{0}, wbMarked{0}, wbSkipUncompressed{0}, wbSkipReplaced{0}, wbSkipNotWhole{0};
+std::atomic<std::uint64_t> labelTrapsArmed{0}, labelTrapResolves{0}, labelTrapResolveBytes{0}, labelTrapBypass{0};
+std::atomic<std::uint64_t> refreshTrapsArmed{0}, refreshTrapsDeferred{0};
 std::atomic<std::uint64_t> queuedReadHeld{0};
 // Images stored by a FlushPending after a hook skip of theirs (AccessKeptByCpu), of which by the
 // hook for the read site of the last skip; images evictStale dropped (the [hooksync] and [storage] lines).
@@ -230,6 +238,7 @@ void reportStorageTraffic(StorageTraffic& traffic) {
     const auto partialUploadCount = take(partialUploads), partialWriteBackCount = take(partialWriteBacks);
     const auto uploadMiB = take(partialUploadBytes) / 1048576.0, writeBackMiB = take(partialWriteBackBytes) / 1048576.0;
     AgcDriver::ProfilePrint_nid_no_patch( "[storage] uploads by path (count/MiB, 10 s):%s; %llu write-backs GPU-direct, %llu stored nothing; block units: partial uploads %llu/%.1f, partial write-backs %llu/%.1f, %llu widened to every pending unit, units dropped %llu, superseded %llu, handed over at %llu clear-key refreshes and %llu image creations (%llu units superseded), dropped unregistered %llu, kept over a key flip %llu%s, pretest skipped %llu, held for a queued draw read %llu, evicted stale %llu; refreshes proved %llu, %llu of them over pending driver key stores (cumulative); drawn linear targets: stores by reason (count/MiB):%s, pending %zu images / %.1f MiB, oldest %.1f ms\n", line.c_str(), static_cast<unsigned long long>(traffic.directWriteBacks), take(emptyWriteBacks), partialUploadCount, uploadMiB, partialWriteBackCount, writeBackMiB, take(coalescedWriteBacks), take(unitsDropped), take(unitsSuperseded), take(clearHandOvers), take(creationHandOvers), take(handedOverSuperseded), take(unregisteredDropped), take(keyFlipKept), ShadowReport().c_str(), take(pretestSkipped), take(queuedReadHeld), take(staleEvicted), static_cast<unsigned long long>(refreshesProved.load(std::memory_order_relaxed)), static_cast<unsigned long long>(refreshesProvedPendingKeys.load(std::memory_order_relaxed)), drawnLine.c_str(), drawn.images, drawn.bytes / 1048576.0, drawn.oldestMs);
+    AgcDriver::ProfilePrint_nid_no_patch("[refresh] 10 s: %llu refreshes (%llu single-pass, %llu multi-pass); %llu stored, %.1f MiB of guest bytes; stored layers: guest-changed %llu, unchanged-kept-by-multipass %llu, key-flip %llu, with a CPU block stamp %llu; widened to every layer %llu times (+%llu layers); by state: keys-changed %llu, ordered-skipped %llu, tracked %llu, untracked %llu, cpu-wrote %llu, block-units %llu, compared %llu, proved-keys-clear %llu, uploaded-uncompressed %llu; layer write-back key step: whole-surface %llu, marked %llu, skipped-already-uncompressed %llu, skipped-keys-replaced-by-clear %llu, skipped-not-whole %llu; label read traps: armed %llu, resolved %llu / %.1f MiB, bypassed-under-gpu-mutex %llu; refresh read traps: armed %llu, deferred %llu\n", take(refreshCalls), take(refreshDirectCalls), take(refreshMultiPassCalls), take(refreshStoredCalls), take(refreshStoredBytes) / 1048576.0, take(refreshStoredChanged), take(refreshStoredUnchanged), take(refreshStoredKeyFlip), take(refreshStoredCpuBlock), take(refreshWidenedFires), take(refreshWidenedLayers), take(refreshKeysChanged), take(refreshOrderedSkipped), take(refreshTracked), take(refreshUntracked), take(refreshCpuWrote), take(refreshBlockUnits), take(refreshCompared), take(refreshKeysClear), take(refreshUploadedUncompressed), take(wbWholeSurface), take(wbMarked), take(wbSkipUncompressed), take(wbSkipReplaced), take(wbSkipNotWhole), take(labelTrapsArmed), take(labelTrapResolves), take(labelTrapResolveBytes) / 1048576.0, take(labelTrapBypass), take(refreshTrapsArmed), take(refreshTrapsDeferred));
     traffic.writeBacks.clear();
     traffic.uploadReasons.clear();
     traffic.drawnStores.clear();
@@ -2552,6 +2561,9 @@ bool StorageTexture::RefreshLayers(std::uint32_t first, std::uint32_t count) {
 
 namespace {
 
+#if defined(APS5_READ_TRAPS)
+bool RefreshTrapsEnabled();
+#endif
 bool& GpuOrderedFlush();
 bool& GpuOrderedSkipped();
 std::atomic<std::uint64_t> orderedFlushSkips{0};
@@ -2899,6 +2911,16 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
         std::fprintf(stderr, "[dcc-keys] refresh 0x%llx+0x%llx keys %s -> %s (dirty %d, %zu pending units, %zu cpu-stamped units%s)\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), DccKeysName(uploadedKeys), DccKeysName(keys), dirty ? 1 : 0, pendingUnits, stampedUnits, keyFlip ? ", flip keeps unstamped results" : "");
     }
     const bool selectedCpu = !direct && keys == DccKeys::Uncompressed && !cpuUploadLayers(changed).empty();
+    refreshCalls.fetch_add(1, std::memory_order_relaxed);
+    (direct ? refreshDirectCalls : refreshMultiPassCalls).fetch_add(1, std::memory_order_relaxed);
+    if (keysChanged) refreshKeysChanged.fetch_add(1, std::memory_order_relaxed);
+    if (orderedSkipped) refreshOrderedSkipped.fetch_add(1, std::memory_order_relaxed);
+    (tracked ? refreshTracked : refreshUntracked).fetch_add(1, std::memory_order_relaxed);
+    if (cpuWrote) refreshCpuWrote.fetch_add(1, std::memory_order_relaxed);
+    if (blockUnits) refreshBlockUnits.fetch_add(1, std::memory_order_relaxed);
+    if (compared) refreshCompared.fetch_add(1, std::memory_order_relaxed);
+    if (IsDccClear(keys) || keys == DccKeys::ClearSingle) refreshKeysClear.fetch_add(1, std::memory_order_relaxed);
+    if (uploadedKeys == DccKeys::Uncompressed) refreshUploadedUncompressed.fetch_add(1, std::memory_order_relaxed);
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
         if (!layerPending[layer]) continue;
         if (keyFlip && layerGeneration[layer] != 0 && stampedBlocks[layer] != GuestMemory::BlockWritten) {
@@ -2907,6 +2929,7 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
             if (direct) continue;
             stored[layer] = true;
             anyStored = true;
+            refreshStoredKeyFlip.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
         if (changed[layer]) {
@@ -2922,15 +2945,36 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
         }
         stored[layer] = true;
         anyStored = true;
+        (changed[layer] ? refreshStoredChanged : refreshStoredUnchanged).fetch_add(1, std::memory_order_relaxed);
+        if (layer < cpuBlocks.size() && cpuBlocks[layer] != 0) refreshStoredCpuBlock.fetch_add(1, std::memory_order_relaxed);
     }
-    if (anyStored && !keysChanged && descriptor.dccAddress != 0 && (IsDccClear(uploadedKeys) || uploadedKeys == DccKeys::ClearSingle)) stored.assign(trackedLayers, true);
+    if (anyStored && !keysChanged && descriptor.dccAddress != 0 && (IsDccClear(uploadedKeys) || uploadedKeys == DccKeys::ClearSingle)) {
+        std::uint64_t widened = 0;
+        for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) widened += stored[layer] ? 0 : 1;
+        refreshWidenedFires.fetch_add(1, std::memory_order_relaxed);
+        refreshWidenedLayers.fetch_add(widened, std::memory_order_relaxed);
+        stored.assign(trackedLayers, true);
+    }
     if (pendingResults) {
         static std::atomic<int> reports{0};
         if (reports.fetch_add(1) < 8) std::fprintf(stderr, "[gpu] storage image 0x%llx: guest memory changed while GPU results were pending; keeping the CPU's blocks\n", static_cast<unsigned long long>(descriptor.baseAddress));
     }
     if (anyStored) {
         const auto previous = std::exchange(flushReason, "refresh");
-        writeBackLayers(stored);
+        refreshStoredCalls.fetch_add(1, std::memory_order_relaxed);
+        refreshStoredBytes.fetch_add(guestBytes, std::memory_order_relaxed);
+        const bool wholeStored = std::all_of(stored.begin(), stored.end(), [](bool layer) { return layer; });
+#if defined(APS5_READ_TRAPS)
+        const bool deferred = RefreshTrapsEnabled() && !scoped && alias == nullptr && !handOverKeys.has_value() && wholeStored && trapReadsForRefresh();
+#else
+        const bool deferred = false;
+        static_cast<void>(wholeStored);
+        static_cast<void>(scoped);
+        static_cast<void>(alias);
+        static_cast<void>(handOverKeys);
+#endif
+        if (deferred) refreshTrapsDeferred.fetch_add(1, std::memory_order_relaxed);
+        else writeBackLayers(stored);
         flushReason = previous;
     } else if (dropped) {
         reconcilePending();
@@ -5227,8 +5271,9 @@ bool StorageTexture::pendingUnitInside(std::uint64_t address, std::size_t bytes)
 
 namespace {
 
-#if defined(__APPLE__)
+#if defined(APS5_READ_TRAPS)
 std::atomic<bool> labelTrapsSet{false};
+std::atomic<bool> refreshTrapsSet{false};
 
 std::uint64_t TrapPage() {
     static const auto page = static_cast<std::uint64_t>(::getpagesize());
@@ -5236,6 +5281,8 @@ std::uint64_t TrapPage() {
 }
 
 void ResolveLabelTrap(std::uintptr_t begin, std::uintptr_t end) {
+    labelTrapResolves.fetch_add(1, std::memory_order_relaxed);
+    labelTrapResolveBytes.fetch_add(end - begin, std::memory_order_relaxed);
     const auto bytes = static_cast<std::size_t>(end - begin);
     GuestMemory::FlushGpuWrites(begin, bytes);
     while (AgcDriver::DriverDetail::DrawPipeline::HeldReads(begin, bytes)) {
@@ -5244,12 +5291,44 @@ void ResolveLabelTrap(std::uintptr_t begin, std::uintptr_t end) {
     }
 }
 
-bool LabelTrapsEnabled() {
+bool ReadTrapsEnabled() {
     static const bool enabled = [] {
-        if (std::getenv("APS5_NO_LABEL_READ_TRAP") != nullptr || !GuestWriteWatch::GuestWriteWatchSetReadTrapResolver_nid_postfix(&ResolveLabelTrap)) return false;
-        GuestWriteWatch::GuestWriteWatchSetReadTrapBypass_nid_postfix(+[] { return GuestMemory::GpuMutex().HeldByThisThread(); });
+#if defined(__linux__)
+        if (std::getenv("APS5_LABEL_READ_TRAP") == nullptr && std::getenv("APS5_REFRESH_READ_TRAP") == nullptr) return false;
+#else
+        if (std::getenv("APS5_NO_LABEL_READ_TRAP") != nullptr && std::getenv("APS5_REFRESH_READ_TRAP") == nullptr) return false;
+#endif
+        if (!GuestWriteWatch::GuestWriteWatchSetReadTrapResolver_nid_postfix(&ResolveLabelTrap)) return false;
+        GuestWriteWatch::GuestWriteWatchSetReadTrapBypass_nid_postfix(+[] {
+            const bool held = GuestMemory::GpuMutex().HeldByThisThread();
+            if (held) labelTrapBypass.fetch_add(1, std::memory_order_relaxed);
+            return held;
+        });
+#if defined(__linux__)
+        const bool label = std::getenv("APS5_LABEL_READ_TRAP") != nullptr;
+#else
+        const bool label = std::getenv("APS5_NO_LABEL_READ_TRAP") == nullptr;
+#endif
+        std::fprintf(stderr, "[read-trap] read traps enabled (label=%d refresh=%d)\n", label, std::getenv("APS5_REFRESH_READ_TRAP") != nullptr);
         return true;
     }();
+    return enabled;
+}
+
+bool LabelTrapsEnabled() {
+    static const bool enabled = [] {
+        if (!ReadTrapsEnabled()) return false;
+#if defined(__linux__)
+        return std::getenv("APS5_LABEL_READ_TRAP") != nullptr;
+#else
+        return std::getenv("APS5_NO_LABEL_READ_TRAP") == nullptr;
+#endif
+    }();
+    return enabled;
+}
+
+bool RefreshTrapsEnabled() {
+    static const bool enabled = ReadTrapsEnabled() && std::getenv("APS5_REFRESH_READ_TRAP") != nullptr;
     return enabled;
 }
 #endif
@@ -5337,7 +5416,7 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
                 ++it;
             }
         }
-#if defined(__APPLE__)
+#if defined(APS5_READ_TRAPS)
         if (!flush.empty() && labelTrapsSet.load(std::memory_order_relaxed)) {
             const auto selected = flush.size();
             for (auto it = pending.textures.begin(); it != pending.textures.end();) {
@@ -5876,7 +5955,7 @@ std::size_t StorageTexture::StoreSmallPending(const char* reason) {
     return stored;
 }
 
-#if defined(__APPLE__)
+#if defined(APS5_READ_TRAPS)
 bool StorageTexture::trapReadsAtLabel(const StorageTexture* texture) {
     auto& pending = Pending();
     const auto page = TrapPage();
@@ -5890,6 +5969,33 @@ bool StorageTexture::trapReadsAtLabel(const StorageTexture* texture) {
     if (!texture->readTrapped.load(std::memory_order_acquire) && DirectMemoryAliased_nid_postfix(address, bytes)) return false;
     if (!GuestWriteWatch::GuestWriteWatchTrapReads_nid_postfix(address, bytes)) return false;
     texture->readTrapped.store(true, std::memory_order_release);
+    labelTrapsArmed.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+bool StorageTexture::trapReadsForRefresh() {
+    auto& pending = Pending();
+    std::lock_guard lock(pending.mutex);
+    if (readTrapped.load(std::memory_order_acquire)) return true;
+    const auto address = static_cast<std::uintptr_t>(descriptor.baseAddress);
+    const auto bytes = static_cast<std::size_t>(guestBytes);
+    if (DirectMemoryAliased_nid_postfix(address, bytes)) return false;
+    const auto page = TrapPage();
+    const auto first = descriptor.baseAddress & ~(page - 1);
+    const auto span = static_cast<std::size_t>(((descriptor.baseAddress + guestBytes + page - 1) & ~(page - 1)) - first);
+    const auto shares = [&](const StorageTexture* other) { return other != this && other->overlaps(first, span); };
+    if (std::any_of(pending.textures.begin(), pending.textures.end(), shares) || std::any_of(pending.flushing.begin(), pending.flushing.end(), shares)) return false;
+    if (!GuestWriteWatch::GuestWriteWatchTrapReads_nid_postfix(address, bytes)) return false;
+    if (descriptor.dccAddress != 0) {
+        const auto keys = static_cast<std::size_t>(DccKeyBytes(guestBytes));
+        if (!GuestWriteWatch::GuestWriteWatchTrapReads_nid_postfix(static_cast<std::uintptr_t>(descriptor.dccAddress), keys)) {
+            GuestWriteWatch::GuestWriteWatchReleaseReads_nid_postfix(address, bytes);
+            return false;
+        }
+    }
+    readTrapped.store(true, std::memory_order_release);
+    refreshTrapsSet.store(true, std::memory_order_relaxed);
+    refreshTrapsArmed.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 #endif
@@ -5908,13 +6014,13 @@ void StorageTexture::StoreReadbackBeforeLabel(const char* reason, VkDevice devic
     {
         auto& pending = Pending();
         std::lock_guard lock(pending.mutex);
-#if defined(__APPLE__)
+#if defined(APS5_READ_TRAPS)
         const bool trap = LabelTrapsEnabled();
         if (trap) labelTrapsSet.store(true, std::memory_order_relaxed);
 #endif
         for (const auto* texture : pending.textures) {
             if (texture->descriptor.tileMode != TextureTileMode::kLinear && texture->guestBytes > SmallStoreBytes) continue;
-#if defined(__APPLE__)
+#if defined(APS5_READ_TRAPS)
             if (trap && trapReadsAtLabel(texture)) continue;
 #endif
             ranges.emplace_back(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
@@ -5939,14 +6045,14 @@ std::size_t StorageTexture::StoreDrawnLinear(const char* reason) {
     std::vector<std::pair<std::uint64_t, std::size_t>> ranges;
     {
         std::lock_guard lock(pending.mutex);
-#if defined(__APPLE__)
+#if defined(APS5_READ_TRAPS)
         const bool trap = (std::strcmp(reason, "label") == 0 || std::strcmp(reason, "interrupt") == 0) && LabelTrapsEnabled();
         if (trap) labelTrapsSet.store(true, std::memory_order_relaxed);
 #endif
         for (const auto& entry : pending.drawn) {
             const auto* texture = entry.texture;
             if (!texture->dirty) continue;
-#if defined(__APPLE__)
+#if defined(APS5_READ_TRAPS)
             if (trap && texture->descriptor.tileMode == TextureTileMode::kLinear && HostImportCovers(texture->context, texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes)) && trapReadsAtLabel(texture)) continue;
 #endif
             ranges.emplace_back(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
@@ -7599,8 +7705,8 @@ std::uint64_t StorageTexture::borrowUnits(StorageTexture& source, const std::vec
 }
 
 void StorageTexture::releaseReadTraps(bool sharingPages) {
-#if defined(__APPLE__)
-    if (!labelTrapsSet.load(std::memory_order_relaxed)) return;
+#if defined(APS5_READ_TRAPS)
+    if (!labelTrapsSet.load(std::memory_order_relaxed) && !refreshTrapsSet.load(std::memory_order_relaxed)) return;
     const auto release = [](const StorageTexture* texture) {
         if (texture->readTrapped.exchange(false, std::memory_order_acq_rel)) GuestWriteWatch::GuestWriteWatchReleaseReads_nid_postfix(static_cast<std::uintptr_t>(texture->descriptor.baseAddress), static_cast<std::size_t>(texture->guestBytes));
     };
@@ -7623,7 +7729,7 @@ void StorageTexture::releaseReadTraps(bool sharingPages) {
 }
 
 void StorageTexture::storeTrappedOverlaps(const char* reason) {
-#if defined(__APPLE__)
+#if defined(APS5_READ_TRAPS)
     if (!labelTrapsSet.load(std::memory_order_relaxed)) return;
     std::vector<std::pair<std::uint64_t, std::size_t>> ranges;
     {
@@ -7742,6 +7848,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         lastStored = std::max(lastStored, layerBegin(layer) + layerBytes(layer));
     }
     if (lastStored <= firstStored) return;
+    const bool wholeSurface = layers.size() >= trackedLayers && std::all_of(layers.begin(), layers.begin() + trackedLayers, [](bool stored) { return stored; });
     struct ReleaseReadTrap {
         StorageTexture& texture;
         ~ReleaseReadTrap() { texture.releaseReadTraps(false); }
@@ -8093,6 +8200,10 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         // metadata is host-imported (no CPU wait for the title's key-writing kernels), else a CPU
         // store (APS5_CPU_DCC_KEYS=1 keeps the CPU store; see DccMetadata.hpp).
         traceKeyStore("layer write-back", descriptor, guestBytes);
+        if (wholeSurface) wbWholeSurface.fetch_add(1, std::memory_order_relaxed);
+        if (uploadedKeys == DccKeys::Uncompressed) wbSkipUncompressed.fetch_add(1, std::memory_order_relaxed);
+        else if (keysReplacedByClear()) wbSkipReplaced.fetch_add(1, std::memory_order_relaxed);
+        else wbSkipNotWhole.fetch_add(1, std::memory_order_relaxed);
         if (!IsDccClear(filledKeys) && uploadedKeys != DccKeys::Uncompressed && !keysReplacedByClear()) MarkDccUncompressed(context, descriptor.dccAddress, guestBytes, DccKeyCount(descriptor, guestBytes));
         uploadedKeys = DccKeys::Uncompressed;
         for (const auto& [from, to] : keep) GuestMemory::MarkWritten(from, static_cast<std::size_t>(to - from));
@@ -8238,7 +8349,10 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     // The texels now hold the whole image, so later reads must see them rather than a fast clear
     // (the keys may be host-imported although the texels were not: then a recorded fill, else a CPU store).
     traceKeyStore("cpu write-back", descriptor, guestBytes);
-    if (!IsDccClear(filledKeys) && uploadedKeys != DccKeys::Uncompressed && !keysReplacedByClear()) MarkDccUncompressed(context, descriptor.dccAddress, guestBytes, DccKeyCount(descriptor, guestBytes));
+    if ((!IsDccClear(filledKeys) || wholeSurface) && uploadedKeys != DccKeys::Uncompressed && !keysReplacedByClear()) {
+        MarkDccUncompressed(context, descriptor.dccAddress, guestBytes, DccKeyCount(descriptor, guestBytes));
+        if (IsDccClear(filledKeys)) filledKeys = DccKeys::Uncompressed;
+    }
     uploadedKeys = DccKeys::Uncompressed;
     // The store above is the only write to these pages, so `original` is current at a fresh
     // generation, unless blocks were kept for the CPU: then the image is stale there.
@@ -8274,6 +8388,7 @@ StorageTexture::~StorageTexture() {
             if (reports.fetch_add(1) < 4) std::fprintf(stderr, "[gpu] storage image 0x%llx destroyed with GPU results pending\n", static_cast<unsigned long long>(descriptor.baseAddress));
         }
     }
+    releaseReadTraps(true);
     release();
 }
 

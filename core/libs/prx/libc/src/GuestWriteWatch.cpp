@@ -13,14 +13,20 @@
 #include <vector>
 
 #if defined(__linux__)
+#include <atomic>
 #include <cerrno>
+#include <csignal>
 #include <cstring>
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <linux/userfaultfd.h>
+#include <pthread.h>
+#include <sched.h>
+#include <semaphore.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <ucontext.h>
 #include <unistd.h>
 #endif
 
@@ -59,7 +65,8 @@ public:
         return *watch;
     }
 
-    bool Available() const {
+    bool Available() {
+        EnsureProcess();
         return _pagemap >= 0;
     }
 
@@ -70,6 +77,7 @@ public:
         remove(_ranges, begin, end);
         remove(_fresh, begin, end);
         cut(begin, end);
+        dropTraps(begin, end);
         uffdio_register registration{};
         registration.range.start = begin;
         registration.range.len = end - begin;
@@ -95,6 +103,7 @@ public:
     bool Unregister(std::uintptr_t begin, std::uintptr_t end) {
         if (!Available() || end <= begin) return false;
         std::unique_lock lock(_lock);
+        dropTraps(begin, end);
         const bool watched = remove(_ranges, begin, end);
         remove(_fresh, begin, end);
         cut(begin, end);
@@ -186,6 +195,132 @@ public:
             }
         }
         return true;
+    }
+
+    bool SetReadTrapResolver(void (*resolver)(std::uintptr_t, std::uintptr_t)) {
+        if (!Available() || resolver == nullptr) return false;
+        {
+            const TrapLock lock(_trapLock);
+            if (!_resolverStarted) {
+                _resolverStarted = true;
+                startResolver();
+            }
+        }
+        if (!_resolverRunning.load(std::memory_order_acquire)) return false;
+        _resolver.store(resolver, std::memory_order_release);
+        return true;
+    }
+
+    void SetReadTrapBypass(bool (*bypass)()) {
+        _bypass.store(bypass, std::memory_order_release);
+    }
+
+    bool TrapReads(std::uintptr_t begin, std::uintptr_t end) {
+        if (!Available() || end <= begin || _resolver.load(std::memory_order_acquire) == nullptr) return false;
+        const auto first = pageStart(begin);
+        const auto last = pageEnd(end);
+        {
+            std::shared_lock lock(_lock);
+            if (!covers(first, last)) return false;
+        }
+        const TrapLock lock(_trapLock);
+        const auto [same, other] = _traps.equal_range(begin);
+        if (std::any_of(same, other, [&](const auto& trap) { return trap.second == end; })) return true;
+        for (const auto& [hostBegin, hostEnd] : _hostWrites)
+            if (hostBegin < last && first < hostEnd) return false;
+        for (auto page = first; page < last;) {
+            const auto known = _pageState.find(page);
+            if (known != _pageState.end() && (known->second & TrapRecorded) != 0) {
+                page += PageBytes;
+                continue;
+            }
+            std::uintptr_t runEnd = 0;
+            const int protection = KernelProtectionRun(page, &runEnd);
+            const auto stop = std::min(last, runEnd);
+            for (; page < stop; page += PageBytes) {
+                auto& state = _pageState[page];
+                if ((state & TrapRecorded) == 0) state = static_cast<std::uint8_t>(TrapRecorded | protection);
+            }
+        }
+        if (::mprotect(reinterpret_cast<void*>(first), last - first, PROT_NONE) != 0) return false;
+        _traps.emplace(begin, end);
+        for (auto page = first; page < last; page += PageBytes) _pageState[page] = static_cast<std::uint8_t>(_pageState[page] | TrapReadTrapped);
+        _trapping.store(true, std::memory_order_release);
+        return true;
+    }
+
+    void ReadTraps(std::uintptr_t begin, std::uintptr_t end, void (*trapped)(void*, std::uintptr_t, std::uintptr_t), void* context) {
+        if (!Available() || end <= begin || !_trapping.load(std::memory_order_acquire)) return;
+        std::vector<std::pair<std::uintptr_t, std::uintptr_t>> runs;
+        {
+            const TrapLock lock(_trapLock);
+            const auto first = pageStart(begin);
+            const auto last = pageEnd(end);
+            for (auto it = _pageState.lower_bound(first); it != _pageState.end() && it->first < last; ++it) {
+                if ((it->second & TrapReadTrapped) == 0) continue;
+                if (!runs.empty() && runs.back().second == it->first) runs.back().second = it->first + PageBytes;
+                else runs.emplace_back(it->first, it->first + PageBytes);
+            }
+        }
+        for (const auto& [runBegin, runEnd] : runs) trapped(context, runBegin, runEnd);
+    }
+
+    void ReleaseReads(std::uintptr_t begin, std::uintptr_t end) {
+        if (!Available() || end <= begin) return;
+        const TrapLock lock(_trapLock);
+        const auto [first, last] = _traps.equal_range(begin);
+        const auto found = std::find_if(first, last, [&](const auto& trap) { return trap.second == end; });
+        if (found == last) return;
+        _traps.erase(found);
+        untrap(begin, end);
+    }
+
+    void BeginHostWrite(std::uintptr_t begin, std::uintptr_t end) {
+        if (!Available() || end <= begin) return;
+        const auto first = pageStart(begin);
+        const auto last = pageEnd(end);
+        if (last <= first) return;
+        withoutTraps(first, last, true, [&] {
+            _hostWrites.emplace_back(first, last);
+            for (auto it = _pageState.lower_bound(first); it != _pageState.end() && it->first < last; ++it) {
+                if ((it->second & TrapReadTrapped) == 0) continue;
+                it->second = static_cast<std::uint8_t>(it->second & ~TrapReadTrapped);
+                ::mprotect(reinterpret_cast<void*>(it->first), PageBytes, static_cast<int>((it->second & TrapProtectionMask) | PROT_WRITE));
+            }
+        });
+    }
+
+    void EndHostWrite(std::uintptr_t begin, std::uintptr_t end) {
+        if (!Available() || end <= begin) return;
+        const auto first = pageStart(begin);
+        const auto last = pageEnd(end);
+        if (last <= first) return;
+        const TrapLock lock(_trapLock);
+        const auto found = std::find(_hostWrites.begin(), _hostWrites.end(), std::pair{first, last});
+        if (found != _hostWrites.end()) _hostWrites.erase(found);
+    }
+
+    void ProtectionChanged(std::uintptr_t begin, std::uintptr_t end, int protection) {
+        if (!Available() || end <= begin) return;
+        const auto first = pageStart(begin);
+        const auto last = pageEnd(end);
+        if (last <= first) return;
+        withoutTraps(first, last, false, [&] {
+            for (auto it = _pageState.lower_bound(first); it != _pageState.end() && it->first < last; ++it)
+                it->second = static_cast<std::uint8_t>((it->second & TrapReadTrapped) | TrapRecorded | (protection & TrapProtectionMask));
+        });
+    }
+
+    int Protect(std::uintptr_t begin, std::uintptr_t end, int protection) {
+        if (!Available()) return ::mprotect(reinterpret_cast<void*>(begin), end - begin, protection) == 0 ? 0 : errno;
+        const auto first = pageStart(begin);
+        const auto last = pageEnd(end);
+        return withoutTraps(first, last, true, [&] {
+            if (::mprotect(reinterpret_cast<void*>(begin), end - begin, protection) != 0) return errno;
+            for (auto it = _pageState.lower_bound(first); it != _pageState.end() && it->first < last; ++it)
+                it->second = static_cast<std::uint8_t>((it->second & TrapReadTrapped) | TrapRecorded | (protection & TrapProtectionMask));
+            return 0;
+        });
     }
 
 private:
@@ -357,6 +492,35 @@ private:
 
 private:
     Watch() {
+        _pid = ::getpid();
+        if (std::getenv("APS5_NO_WRITE_WATCH") == nullptr) open();
+    }
+
+    void EnsureProcess() {
+        const auto pid = ::getpid();
+        if (pid == _pid) return;
+        _pid = pid;
+        reopen();
+    }
+
+    void reopen() {
+        if (_uffd >= 0) close(_uffd);
+        if (_pagemap >= 0) close(_pagemap);
+        _uffd = -1;
+        _pagemap = -1;
+        _ranges.clear();
+        _fresh.clear();
+        _links.clear();
+        _linkBytes = 0;
+        _pageState.clear();
+        _traps.clear();
+        _hostWrites.clear();
+        _resolving.clear();
+        _deferred.clear();
+        _resolverStarted = false;
+        _resolverRunning.store(false, std::memory_order_release);
+        _trapping.store(false, std::memory_order_release);
+        _resolver.store(nullptr, std::memory_order_release);
         if (std::getenv("APS5_NO_WRITE_WATCH") == nullptr) open();
         else std::snprintf(g_unavailableReason, sizeof(g_unavailableReason), "disabled by APS5_NO_WRITE_WATCH");
     }
@@ -484,6 +648,382 @@ private:
     std::map<std::uintptr_t, std::uintptr_t> _fresh;
     std::multimap<std::uintptr_t, Link> _links;
     std::uintptr_t _linkBytes = 0;
+
+    static constexpr std::uint8_t TrapProtectionMask = PROT_READ | PROT_WRITE | PROT_EXEC;
+    static constexpr std::uint8_t TrapRecorded = 0x40;
+    static constexpr std::uint8_t TrapReadTrapped = 0x80;
+    static constexpr std::size_t ResolveSlots = 32;
+    static constexpr std::size_t ResolvingCapacity = 4096;
+    static constexpr std::size_t RetrySlots = 64;
+    static constexpr unsigned UntrappedRetries = 16;
+    static constexpr unsigned GenerationRetries = RetrySlots * UntrappedRetries;
+
+    enum SlotState : unsigned { Free, Claimed, Queued, Running, Done };
+    enum class Owner { Any, Self, Others };
+
+    struct TrapMutex {
+        TrapMutex() {
+            pthread_mutex_init(&mutex, nullptr);
+            pthread_cond_init(&idle, nullptr);
+        }
+        pthread_mutex_t mutex;
+        pthread_cond_t idle;
+        std::atomic<unsigned> faulting{0};
+    };
+
+    struct TrapLock {
+        explicit TrapLock(TrapMutex& mutex) : _mutex(mutex) {
+            pthread_mutex_lock(&_mutex.mutex);
+            while (_mutex.faulting.load(std::memory_order_acquire) != 0) pthread_cond_wait(&_mutex.idle, &_mutex.mutex);
+        }
+        ~TrapLock() {
+            pthread_mutex_unlock(&_mutex.mutex);
+        }
+        TrapMutex& _mutex;
+    };
+
+    struct TrapFaultLock {
+        explicit TrapFaultLock(TrapMutex& mutex) : _mutex(mutex) {
+            _mutex.faulting.fetch_add(1, std::memory_order_acq_rel);
+            pthread_mutex_lock(&_mutex.mutex);
+        }
+        ~TrapFaultLock() {
+            if (_mutex.faulting.fetch_sub(1, std::memory_order_acq_rel) == 1) pthread_cond_broadcast(&_mutex.idle);
+            pthread_mutex_unlock(&_mutex.mutex);
+        }
+        TrapMutex& _mutex;
+    };
+
+    struct Slot {
+        std::atomic<unsigned> state{Free};
+        std::uintptr_t page = 0;
+        sem_t done{};
+    };
+
+    struct Resolving {
+        std::uintptr_t begin;
+        std::uintptr_t end;
+        pthread_t owner;
+    };
+
+    struct Retry {
+        std::uintptr_t page = 0;
+        pthread_t thread{};
+        std::uint64_t generation = 0;
+        std::uint64_t used = 0;
+        unsigned count = 0;
+    };
+
+    void startResolver() {
+        struct sigaction action {};
+        action.sa_sigaction = &Watch::fault;
+        action.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGBUS, &action, &_previousBus) != 0 || sigaction(SIGSEGV, &action, &_previousSegv) != 0) {
+            std::fprintf(stderr, "[memory] write watch: cannot install the fault handler (%s); read traps stay off\n", std::strerror(errno));
+            return;
+        }
+        _resolving.reserve(ResolvingCapacity);
+        _deferred.reserve(ResolvingCapacity);
+        if (sem_init(&_wake, 0, 0) != 0) return;
+        for (auto& slot : _slots)
+            if (sem_init(&slot.done, 0, 0) != 0) return;
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+        const bool created = pthread_create(&_resolverThread, &attributes, [](void* watch) -> void* {
+            static_cast<Watch*>(watch)->resolveLoop();
+            return nullptr;
+        }, this) == 0;
+        pthread_attr_destroy(&attributes);
+        _resolverRunning.store(created, std::memory_order_release);
+    }
+
+    void resolveLoop() {
+        pthread_setname_np(pthread_self(), "read-traps");
+        for (;;) {
+            if (sem_wait(&_wake) != 0 && errno != EINTR) continue;
+            for (auto& slot : _slots) {
+                unsigned expected = Queued;
+                if (!slot.state.compare_exchange_strong(expected, Running, std::memory_order_acq_rel)) continue;
+                const auto page = slot.page;
+                waitForResolving(page, page + PageBytes);
+                resolve(page, page + PageBytes);
+                {
+                    const TrapLock lock(_trapLock);
+                    untrap(page, page + PageBytes);
+                }
+                slot.state.store(Done, std::memory_order_release);
+                sem_post(&slot.done);
+            }
+        }
+    }
+
+    void resolve(std::uintptr_t begin, std::uintptr_t end) {
+        std::vector<std::pair<std::uintptr_t, std::uintptr_t>> taken;
+        const auto self = pthread_self();
+        {
+            const TrapLock lock(_trapLock);
+            taken = takeTraps(begin, end);
+            for (const auto& [first, last] : taken) _resolving.push_back({first, last, self});
+        }
+        if (taken.empty()) return;
+        const auto resolver = _resolver.load(std::memory_order_acquire);
+        for (const auto& [first, last] : taken) resolver(first, last);
+        for (;;) {
+            std::pair<std::uintptr_t, std::uintptr_t> deferred;
+            {
+                const TrapLock lock(_trapLock);
+                const auto found = std::find_if(_deferred.begin(), _deferred.end(), [&](const Resolving& entry) { return pthread_equal(entry.owner, self); });
+                if (found == _deferred.end()) break;
+                deferred = {found->begin, found->end};
+                _deferred.erase(found);
+                auto [first, last] = _traps.equal_range(deferred.first);
+                while (first != last && first->second != deferred.second) ++first;
+                if (first == last) {
+                    const auto entry = std::find_if(_resolving.begin(), _resolving.end(), [&](const Resolving& resolving) { return resolving.begin == deferred.first && resolving.end == deferred.second && pthread_equal(resolving.owner, self); });
+                    if (entry != _resolving.end()) _resolving.erase(entry);
+                    continue;
+                }
+                _traps.erase(first);
+            }
+            taken.push_back(deferred);
+            resolver(deferred.first, deferred.second);
+        }
+        const TrapLock lock(_trapLock);
+        for (const auto& [first, last] : taken) {
+            const auto found = std::find_if(_resolving.begin(), _resolving.end(), [&](const Resolving& entry) { return entry.begin == first && entry.end == last && pthread_equal(entry.owner, self); });
+            if (found != _resolving.end()) _resolving.erase(found);
+        }
+        for (const auto& [first, last] : taken) untrap(first, last);
+    }
+
+    void deferCovering(std::uintptr_t page) {
+        const auto self = pthread_self();
+        for (auto it = _traps.begin(); it != _traps.end() && it->first < page + PageBytes; ++it) {
+            if (it->second <= page || _deferred.size() == _deferred.capacity() || _resolving.size() == _resolving.capacity()) continue;
+            if (std::any_of(_deferred.begin(), _deferred.end(), [&](const Resolving& entry) { return entry.begin == it->first && entry.end == it->second; })) continue;
+            _resolving.push_back({it->first, it->second, self});
+            _deferred.push_back({it->first, it->second, self});
+        }
+    }
+
+    void waitForResolving(std::uintptr_t begin, std::uintptr_t end) {
+        for (;;) {
+            {
+                const TrapLock lock(_trapLock);
+                if (!resolvingCovers(begin, end, Owner::Others)) return;
+            }
+            sched_yield();
+        }
+    }
+
+    bool resolvingCovers(std::uintptr_t begin, std::uintptr_t end, Owner owner) const {
+        const auto self = pthread_self();
+        return std::any_of(_resolving.begin(), _resolving.end(), [&](const Resolving& entry) {
+            if (pageStart(entry.begin) >= end || begin >= pageEnd(entry.end)) return false;
+            return owner == Owner::Any || (pthread_equal(entry.owner, self) != 0) == (owner == Owner::Self);
+        });
+    }
+
+    bool retryUntrapped(std::uintptr_t page, std::uint8_t state, bool write) {
+        if ((state & TrapProtectionMask & static_cast<std::uint8_t>(write ? PROT_WRITE : PROT_READ)) == 0) return false;
+        if (_retryGeneration != _untrapGeneration) {
+            _retryGeneration = _untrapGeneration;
+            _generationRetries = 0;
+        }
+        if (++_generationRetries > GenerationRetries) return false;
+        const auto thread = pthread_self();
+        auto found = std::find_if(_retries.begin(), _retries.end(), [&](const Retry& retry) { return retry.used != 0 && retry.page == page && pthread_equal(retry.thread, thread); });
+        if (found == _retries.end()) found = std::min_element(_retries.begin(), _retries.end(), [](const Retry& left, const Retry& right) { return left.used < right.used; });
+        if (found->used == 0 || found->page != page || !pthread_equal(found->thread, thread) || found->generation != _untrapGeneration) *found = {page, thread, _untrapGeneration, 0, 0};
+        found->used = ++_retryUses;
+        return ++found->count <= UntrappedRetries;
+    }
+
+    bool resolveTrap(std::uintptr_t address, bool write) {
+        if (!_trapping.load(std::memory_order_acquire)) return false;
+        const auto page = pageStart(address);
+        {
+            const TrapFaultLock lock(_trapLock);
+            const auto found = _pageState.find(page);
+            if (found == _pageState.end()) return false;
+            if ((found->second & TrapReadTrapped) == 0) return retryUntrapped(page, found->second, write);
+            const bool own = resolvingCovers(page, page + PageBytes, Owner::Self) || pthread_equal(pthread_self(), _resolverThread);
+            const auto bypass = _bypass.load(std::memory_order_acquire);
+            if (own || (bypass != nullptr && bypass()) || (!trapCovers(page, page + PageBytes) && !resolvingCovers(page, page + PageBytes, Owner::Any))) {
+                if (own) deferCovering(page);
+                found->second = static_cast<std::uint8_t>(found->second & ~TrapReadTrapped);
+                ++_untrapGeneration;
+                return ::mprotect(reinterpret_cast<void*>(page), PageBytes, static_cast<int>(found->second & TrapProtectionMask)) == 0;
+            }
+        }
+        Slot* slot = nullptr;
+        while (slot == nullptr) {
+            for (auto& candidate : _slots) {
+                unsigned expected = Free;
+                if (candidate.state.compare_exchange_strong(expected, Claimed, std::memory_order_acq_rel)) {
+                    slot = &candidate;
+                    break;
+                }
+            }
+            if (slot == nullptr) sched_yield();
+        }
+        slot->page = page;
+        slot->state.store(Queued, std::memory_order_release);
+        sem_post(&_wake);
+        while (sem_wait(&slot->done) != 0) {
+            if (errno != EINTR) break;
+        }
+        slot->state.store(Free, std::memory_order_release);
+        return true;
+    }
+
+    template <typename TFunction>
+    std::invoke_result_t<TFunction> withoutTraps(std::uintptr_t begin, std::uintptr_t end, bool restore, TFunction function) {
+        for (;;) {
+            if (_trapping.load(std::memory_order_acquire)) {
+                waitForResolving(pageStart(begin), pageEnd(end));
+                resolve(begin, end);
+            }
+            const TrapLock lock(_trapLock);
+            if (trapCovers(pageStart(begin), pageEnd(end)) || resolvingCovers(pageStart(begin), pageEnd(end), Owner::Others)) continue;
+            if (restore) untrap(begin, end);
+            else for (auto it = _pageState.lower_bound(pageStart(begin)); it != _pageState.end() && it->first < pageEnd(end); ++it) it->second = static_cast<std::uint8_t>(it->second & ~TrapReadTrapped);
+            return function();
+        }
+    }
+
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> takeTraps(std::uintptr_t begin, std::uintptr_t end) {
+        std::vector<std::pair<std::uintptr_t, std::uintptr_t>> taken;
+        const auto first = pageStart(begin);
+        const auto last = pageEnd(end);
+        for (auto it = _traps.begin(); it != _traps.end();) {
+            if (it->first >= last || it->second <= first) {
+                ++it;
+                continue;
+            }
+            taken.emplace_back(*it);
+            it = _traps.erase(it);
+        }
+        return taken;
+    }
+
+    void dropTraps(std::uintptr_t begin, std::uintptr_t end) {
+        for (const auto& [first, last] : takeTraps(begin, end)) untrap(first, last);
+        untrap(begin, end);
+    }
+
+    bool trapCovers(std::uintptr_t begin, std::uintptr_t end) const {
+        return std::any_of(_traps.begin(), _traps.end(), [&](const auto& trap) { return trap.first < end && begin < trap.second; });
+    }
+
+    void untrap(std::uintptr_t begin, std::uintptr_t end) {
+        const auto first = pageStart(begin);
+        const auto last = pageEnd(end);
+        for (auto it = _pageState.lower_bound(first); it != _pageState.end() && it->first < last; ++it) {
+            if ((it->second & TrapReadTrapped) == 0) continue;
+            const auto page = it->first;
+            if (trapCovers(page, page + PageBytes)) continue;
+            if (resolvingCovers(page, page + PageBytes, Owner::Others)) continue;
+            it->second = static_cast<std::uint8_t>(it->second & ~TrapReadTrapped);
+            ::mprotect(reinterpret_cast<void*>(page), PageBytes, static_cast<int>(it->second & TrapProtectionMask));
+            ++_untrapGeneration;
+        }
+    }
+
+    static bool isWriteFault(void* context) {
+#if defined(__x86_64__)
+        return (static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_ERR] & 2) != 0;
+#else
+        static_cast<void>(context);
+        return false;
+#endif
+    }
+
+    static void fault(int signal, siginfo_t* info, void* context) {
+        auto& watch = Get();
+        if (info->si_code > 0 && context != nullptr && watch.resolveTrap(reinterpret_cast<std::uintptr_t>(info->si_addr), isWriteFault(context))) return;
+        const auto& previous = signal == SIGBUS ? watch._previousBus : watch._previousSegv;
+        if ((previous.sa_flags & SA_SIGINFO) != 0 && previous.sa_sigaction != nullptr) {
+            previous.sa_sigaction(signal, info, context);
+            return;
+        }
+        if (previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN && previous.sa_handler != nullptr) {
+            previous.sa_handler(signal);
+            return;
+        }
+        ::signal(signal, SIG_DFL);
+        if (previous.sa_handler == SIG_DFL) ::raise(signal);
+    }
+
+    static std::uintptr_t pageStart(std::uintptr_t address) {
+        return address & ~(PageBytes - 1);
+    }
+
+    static std::uintptr_t pageEnd(std::uintptr_t address) {
+        return (address + PageBytes - 1) & ~(PageBytes - 1);
+    }
+
+    static int KernelProtectionRun(std::uintptr_t address, std::uintptr_t* runEnd) {
+        *runEnd = address + PageBytes;
+        const int handle = ::open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+        if (handle < 0) return PROT_READ | PROT_WRITE;
+        char buffer[4096];
+        std::size_t used = 0;
+        int protection = PROT_READ | PROT_WRITE;
+        bool found = false;
+        while (!found) {
+            const auto got = ::read(handle, buffer + used, sizeof(buffer) - used - 1);
+            if (got <= 0) break;
+            used += static_cast<std::size_t>(got);
+            buffer[used] = '\0';
+            std::size_t consumed = 0;
+            for (std::size_t at = 0; at < used && !found; ++at) {
+                if (buffer[at] != '\n') continue;
+                unsigned long long first = 0;
+                unsigned long long last = 0;
+                char access[8] = {};
+                if (std::sscanf(buffer + consumed, "%llx-%llx %7s", &first, &last, access) == 3 && address >= first && address < last) {
+                    protection = (access[0] == 'r' ? PROT_READ : 0) | (access[1] == 'w' ? PROT_WRITE : 0) | (access[2] == 'x' ? PROT_EXEC : 0);
+                    *runEnd = last;
+                    found = true;
+                }
+                consumed = at + 1;
+            }
+            if (consumed > 0) {
+                used -= consumed;
+                std::memmove(buffer, buffer + consumed, used);
+            }
+            if (used >= sizeof(buffer) - 1) break;
+        }
+        ::close(handle);
+        if (found && *runEnd <= address) *runEnd = address + PageBytes;
+        return protection;
+    }
+
+    TrapMutex _trapLock;
+    std::multimap<std::uintptr_t, std::uintptr_t> _traps;
+    std::map<std::uintptr_t, std::uint8_t> _pageState;
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> _hostWrites;
+    std::vector<Resolving> _resolving;
+    std::vector<Resolving> _deferred;
+    std::array<Retry, RetrySlots> _retries{};
+    std::uint64_t _retryUses = 0;
+    std::uint64_t _retryGeneration = 0;
+    unsigned _generationRetries = 0;
+    std::uint64_t _untrapGeneration = 0;
+    std::atomic<bool> _trapping{false};
+    std::atomic<void (*)(std::uintptr_t, std::uintptr_t)> _resolver{nullptr};
+    std::atomic<bool (*)()> _bypass{nullptr};
+    bool _resolverStarted = false;
+    std::atomic<bool> _resolverRunning{false};
+    pthread_t _resolverThread{};
+    sem_t _wake{};
+    int _pid = 0;
+    std::array<Slot, ResolveSlots> _slots;
+    struct sigaction _previousBus {};
+    struct sigaction _previousSegv {};
 };
 
 const bool g_opened = (Watch::Get(), true);
@@ -1292,7 +1832,7 @@ bool GuestWriteWatchCollect_nid_postfix(std::uintptr_t address, std::size_t byte
 }
 
 void GuestWriteWatchBeginHostWrite_nid_postfix(const void* pointer, std::size_t bytes) {
-#if defined(__APPLE__)
+#ifdef APS5_GUEST_WRITE_WATCH
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     Watch::Get().BeginHostWrite(begin, begin + bytes);
 #else
@@ -1302,7 +1842,7 @@ void GuestWriteWatchBeginHostWrite_nid_postfix(const void* pointer, std::size_t 
 }
 
 void GuestWriteWatchEndHostWrite_nid_postfix(const void* pointer, std::size_t bytes) {
-#if defined(__APPLE__)
+#ifdef APS5_GUEST_WRITE_WATCH
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     Watch::Get().EndHostWrite(begin, begin + bytes);
 #else
@@ -1312,7 +1852,7 @@ void GuestWriteWatchEndHostWrite_nid_postfix(const void* pointer, std::size_t by
 }
 
 void GuestWriteWatchProtectionChanged_nid_postfix(const void* pointer, std::size_t bytes, int protection) {
-#if defined(__APPLE__)
+#ifdef APS5_GUEST_WRITE_WATCH
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     Watch::Get().ProtectionChanged(begin, begin + bytes, protection);
 #else
@@ -1323,7 +1863,7 @@ void GuestWriteWatchProtectionChanged_nid_postfix(const void* pointer, std::size
 }
 
 int GuestWriteWatchProtect_nid_postfix(void* pointer, std::size_t bytes, int protection) {
-#if defined(__APPLE__)
+#ifdef APS5_GUEST_WRITE_WATCH
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     return Watch::Get().Protect(begin, begin + bytes, protection);
 #else
@@ -1377,7 +1917,7 @@ bool GuestWriteWatchCollectArmed_nid_postfix(std::uintptr_t address, std::size_t
 }
 
 bool GuestWriteWatchSetReadTrapResolver_nid_postfix(void (*resolve)(std::uintptr_t begin, std::uintptr_t end)) {
-#if defined(__APPLE__)
+#ifdef APS5_GUEST_WRITE_WATCH
     return Watch::Get().SetReadTrapResolver(resolve);
 #else
     static_cast<void>(resolve);
@@ -1386,7 +1926,7 @@ bool GuestWriteWatchSetReadTrapResolver_nid_postfix(void (*resolve)(std::uintptr
 }
 
 void GuestWriteWatchSetReadTrapBypass_nid_postfix(bool (*bypass)()) {
-#if defined(__APPLE__)
+#ifdef APS5_GUEST_WRITE_WATCH
     Watch::Get().SetReadTrapBypass(bypass);
 #else
     static_cast<void>(bypass);
@@ -1394,7 +1934,7 @@ void GuestWriteWatchSetReadTrapBypass_nid_postfix(bool (*bypass)()) {
 }
 
 bool GuestWriteWatchTrapReads_nid_postfix(std::uintptr_t address, std::size_t bytes) {
-#if defined(__APPLE__)
+#ifdef APS5_GUEST_WRITE_WATCH
     return bytes != 0 && address + bytes > address && Watch::Get().TrapReads(address, address + bytes);
 #else
     static_cast<void>(address);
@@ -1404,7 +1944,7 @@ bool GuestWriteWatchTrapReads_nid_postfix(std::uintptr_t address, std::size_t by
 }
 
 void GuestWriteWatchReadTraps_nid_postfix(std::uintptr_t address, std::size_t bytes, void (*trapped)(void* context, std::uintptr_t begin, std::uintptr_t end), void* context) {
-#if defined(__APPLE__)
+#ifdef APS5_GUEST_WRITE_WATCH
     if (bytes != 0 && address + bytes > address) Watch::Get().ReadTraps(address, address + bytes, trapped, context);
 #else
     static_cast<void>(address);
@@ -1415,7 +1955,7 @@ void GuestWriteWatchReadTraps_nid_postfix(std::uintptr_t address, std::size_t by
 }
 
 void GuestWriteWatchReleaseReads_nid_postfix(std::uintptr_t address, std::size_t bytes) {
-#if defined(__APPLE__)
+#ifdef APS5_GUEST_WRITE_WATCH
     if (bytes != 0 && address + bytes > address) Watch::Get().ReleaseReads(address, address + bytes);
 #else
     static_cast<void>(address);

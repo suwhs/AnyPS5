@@ -52,4 +52,7 @@ else()
 
     add_test(NAME write_watch_read-trap-trim COMMAND write_watch_tests read-trap-trim)
     set_tests_properties(write_watch_read-trap-trim PROPERTIES TIMEOUT 120 ENVIRONMENT APS5_WRITE_WATCH_PAGE_STATE_LIMIT=1)
+
+    add_test(NAME write_watch_read-trap-late-no-retry COMMAND write_watch_tests read-trap-late)
+    set_tests_properties(write_watch_read-trap-late-no-retry PROPERTIES TIMEOUT 30 ENVIRONMENT APS5_WRITE_WATCH_UNTRAPPED_RETRIES=0 WILL_FAIL TRUE)
 endif()

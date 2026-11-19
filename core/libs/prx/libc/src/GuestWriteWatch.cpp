@@ -497,6 +497,7 @@ private:
     Watch() {
         _pid = ::getpid();
         if (const char* limit = std::getenv("APS5_WRITE_WATCH_PAGE_STATE_LIMIT")) _pageStateLimit = std::strtoul(limit, nullptr, 0);
+        if (const char* retries = std::getenv("APS5_WRITE_WATCH_UNTRAPPED_RETRIES")) _untrappedRetries = static_cast<unsigned>(std::strtoul(retries, nullptr, 0));
         if (std::getenv("APS5_NO_WRITE_WATCH") == nullptr) open();
     }
 
@@ -866,7 +867,7 @@ private:
         if (found == _retries.end()) found = std::min_element(_retries.begin(), _retries.end(), [](const Retry& left, const Retry& right) { return left.used < right.used; });
         if (found->used == 0 || found->page != page || !pthread_equal(found->thread, thread) || found->generation != _untrapGeneration) *found = {page, thread, _untrapGeneration, 0, 0};
         found->used = ++_retryUses;
-        return ++found->count <= UntrappedRetries;
+        return ++found->count <= _untrappedRetries;
     }
 
     bool resolveTrap(std::uintptr_t address, bool write) {
@@ -1035,6 +1036,7 @@ private:
     std::multimap<std::uintptr_t, std::uintptr_t> _traps;
     std::map<std::uintptr_t, std::uint8_t> _pageState;
     std::size_t _pageStateLimit = PageStateLimit;
+    unsigned _untrappedRetries = UntrappedRetries;
     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> _hostWrites;
     std::vector<Resolving> _resolving;
     std::vector<Resolving> _deferred;

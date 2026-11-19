@@ -17,15 +17,16 @@
 #include <utility>
 #include <vector>
 
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
-#include <mach/ndr.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#if !defined(__APPLE__)
-#error The page protection write watch is the macOS backend
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach/ndr.h>
+#elif !defined(__linux__)
+#error The page protection write watch is the macOS and Linux backend
 #endif
 
 using namespace GuestWriteWatch;
@@ -35,6 +36,12 @@ namespace {
 void Require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
+
+#if defined(__APPLE__)
+constexpr int WatchedProtection = PROT_READ;
+#else
+constexpr int WatchedProtection = PROT_READ | PROT_WRITE;
+#endif
 
 struct Region {
     explicit Region(std::size_t pageCount) : page(static_cast<std::size_t>(::getpagesize())), bytes(pageCount * page) {
@@ -129,6 +136,7 @@ void CheckRegisterAgain() {
     Require(region.Collect() == std::set<std::size_t>({0, 3}), "the rest of a split range stops reporting writes");
 }
 
+#if defined(__APPLE__)
 int KernelProtection(const void* page) {
     mach_vm_address_t address = reinterpret_cast<mach_vm_address_t>(page);
     mach_vm_size_t size = 0;
@@ -138,6 +146,33 @@ int KernelProtection(const void* page) {
     Require(mach_vm_region(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) == KERN_SUCCESS && address == reinterpret_cast<mach_vm_address_t>(page), "cannot read the kernel protection of a page");
     return ((info.protection & VM_PROT_READ) ? PROT_READ : 0) | ((info.protection & VM_PROT_WRITE) ? PROT_WRITE : 0) | ((info.protection & VM_PROT_EXECUTE) ? PROT_EXEC : 0);
 }
+#else
+int ProtectionOf(const void* page) {
+    const auto address = reinterpret_cast<std::uintptr_t>(page);
+    std::FILE* maps = std::fopen("/proc/self/maps", "r");
+    Require(maps != nullptr, "cannot read the process mappings");
+    int protection = -1;
+    char* line = nullptr;
+    std::size_t capacity = 0;
+    while (::getline(&line, &capacity, maps) >= 0) {
+        unsigned long long first = 0;
+        unsigned long long last = 0;
+        char access[8] = {};
+        if (std::sscanf(line, "%llx-%llx %7s", &first, &last, access) != 3) continue;
+        if (address < first || address >= last) continue;
+        protection = (access[0] == 'r' ? PROT_READ : 0) | (access[1] == 'w' ? PROT_WRITE : 0) | (access[2] == 'x' ? PROT_EXEC : 0);
+        break;
+    }
+    std::free(line);
+    std::fclose(maps);
+    Require(protection >= 0, "cannot read the kernel protection of a page");
+    return protection;
+}
+
+int KernelProtection(const void* page) {
+    return ProtectionOf(page);
+}
+#endif
 
 void CheckRegisterMapped() {
     Region region(4);
@@ -340,6 +375,7 @@ void CheckThreads() {
     Require(region.Collect().empty(), "writes are reported after the writers stopped");
 }
 
+#if defined(__APPLE__)
 int PageProtection(const void* page) {
     mach_vm_address_t address = reinterpret_cast<mach_vm_address_t>(page);
     mach_vm_size_t size = 0;
@@ -349,6 +385,11 @@ int PageProtection(const void* page) {
     Require(mach_vm_region(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) == KERN_SUCCESS && address <= reinterpret_cast<mach_vm_address_t>(page), "cannot read the kernel protection of a page");
     return ((info.protection & VM_PROT_READ) ? PROT_READ : 0) | ((info.protection & VM_PROT_WRITE) ? PROT_WRITE : 0) | ((info.protection & VM_PROT_EXECUTE) ? PROT_EXEC : 0);
 }
+#else
+int PageProtection(const void* page) {
+    return ProtectionOf(page);
+}
+#endif
 
 struct TrapLog {
     std::mutex mutex;
@@ -412,7 +453,7 @@ void CheckReadTrap() {
     const auto begin = region.Address(1) + 100;
     Require(GuestWriteWatchTrapReads_nid_postfix(begin, page), "cannot set a read trap");
     Require(PageProtection(region.base + page) == PROT_NONE && PageProtection(region.base + 2 * page) == PROT_NONE, "a read trap does not take the access to its pages");
-    Require(PageProtection(region.base) == PROT_READ && PageProtection(region.base + 3 * page) == PROT_READ, "a read trap changes pages outside its range");
+    Require(PageProtection(region.base) == WatchedProtection && PageProtection(region.base + 3 * page) == WatchedProtection, "a read trap changes pages outside its range");
     std::thread::id reader;
     Require(ReadOnThread(region.base + page + 105, &reader) == 0xa5, "a read of a trapped page does not see the resolver's bytes");
     std::vector<std::thread::id> threads;
@@ -424,7 +465,7 @@ void CheckReadTrap() {
 
     Require(GuestWriteWatchTrapReads_nid_postfix(region.Address(3), page) && GuestWriteWatchTrapReads_nid_postfix(region.Address(3), page), "cannot set a read trap twice");
     GuestWriteWatchReleaseReads_nid_postfix(region.Address(3), page);
-    Require(PageProtection(region.base + 3 * page) == PROT_READ, "a released read trap set twice does not give back the watch's protection");
+    Require(PageProtection(region.base + 3 * page) == WatchedProtection, "a released read trap set twice does not give back the watch's protection");
     Require(ReadOnThread(region.base + 3 * page) == 0 && TakeTrapCalls().empty(), "a released read trap resolves");
 
     log.fill = 0x11;
@@ -627,6 +668,7 @@ void CheckReadTrapThreads() {
     ::alarm(0);
 }
 
+#if defined(__APPLE__)
 void CheckReadTrapLateFaults() {
     const pid_t child = ::fork();
     Require(child >= 0, "cannot fork a child for late read faults");
@@ -790,6 +832,7 @@ void CheckReadTrapFaultBound() {
     Require(::waitpid(child, &status, 0) == child, "cannot wait for the persistent read fault child");
     Require(WIFSIGNALED(status) && (WTERMSIG(status) == SIGBUS || WTERMSIG(status) == SIGSEGV), "66 threads that keep faulting on a truncated mapping in turn are retried without bound");
 }
+#endif
 
 void CheckRaisedSignals() {
     Require(GuestWriteWatchAvailable_nid_postfix(), "write watch is unavailable");
@@ -886,8 +929,10 @@ int main(int argc, char** argv) {
         else if (mode == "read-trap-threads") CheckReadTrapThreads();
         else if (mode == "read-trap-holder") CheckReadTrapHolder();
         else if (mode == "read-trap-fault") CheckReadTrapFaults();
+#if defined(__APPLE__)
         else if (mode == "read-trap-late") CheckReadTrapLateFaults();
         else if (mode == "read-trap-fault-bound") CheckReadTrapFaultBound();
+#endif
         else throw std::runtime_error("unknown write watch test");
         std::printf("write watch %s passed\n", argv[1]);
         return 0;

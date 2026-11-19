@@ -7,10 +7,18 @@
 static void Require(bool value) { if (!value) std::abort(); }
 int main() {
     const char* key = "ANYPS5_GUEST_ENV_TEST_4C27";
+    const char* forwarded = "GUEST_ENV_PASS_4C27";
+    const char* forwardedHost = "_APS5_GUEST_ENV_PASS_4C27";
 #ifdef _WIN32
     Require(_putenv_s(key, "host") == 0);
+    Require(_putenv_s(forwardedHost, "forwarded") == 0);
+    Require(_putenv_s("_APS5_GUEST_ENV_SPLIT_4C27", "a=b") == 0);
+    Require(_putenv_s("_APS5_", "empty") == 0);
 #else
     Require(::setenv(key, "host", 1) == 0);
+    Require(::setenv(forwardedHost, "forwarded", 1) == 0);
+    Require(::setenv("_APS5_GUEST_ENV_SPLIT_4C27", "a=b", 1) == 0);
+    Require(::setenv("_APS5_", "empty", 1) == 0);
 #endif
     Require(getenv_nid_postfix(key) == nullptr);
 #ifdef _WIN32
@@ -19,6 +27,9 @@ int main() {
     Require(::setenv("HOME", "/home/host", 1) == 0);
 #endif
     for (const char* host : {"HOME", "PATH"}) Require(std::getenv(host) != nullptr && getenv_nid_postfix(host) == nullptr);
+    Require(std::strcmp(getenv_nid_postfix(forwarded), "forwarded") == 0);
+    Require(getenv_nid_postfix(forwardedHost) == nullptr);
+    Require(std::strcmp(getenv_nid_postfix("GUEST_ENV_SPLIT_4C27"), "a=b") == 0);
     Require(setenv_nid_postfix(key, "inherited", 0) == 0);
     Require(setenv_nid_postfix(key, "kept out", 0) == 0);
     Require(std::strcmp(getenv_nid_postfix(key), "inherited") == 0);
@@ -82,4 +93,10 @@ int main() {
     Require(getenv_nid_postfix("Q7C") == lent + 4 && std::strcmp(second, "again") == 0);
     Require(setenv_nid_postfix("Q7C", "own", 1) == 0);
     Require(std::strcmp(getenv_nid_postfix("Q7C"), "own") == 0 && std::strcmp(lent, "Q7C=lent") == 0 && std::strcmp(second, "again") == 0);
+    Require(setenv_nid_postfix(forwarded, "guest", 1) == 0);
+    Require(std::strcmp(getenv_nid_postfix(forwarded), "guest") == 0);
+    Require(std::strcmp(std::getenv(forwardedHost), "forwarded") == 0);
+    Require(unsetenv_nid_postfix(forwarded) == 0);
+    Require(getenv_nid_postfix(forwarded) == nullptr);
+    Require(std::strcmp(std::getenv(forwardedHost), "forwarded") == 0);
 }

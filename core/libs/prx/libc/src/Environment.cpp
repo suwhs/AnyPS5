@@ -16,7 +16,13 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 
+#ifndef _WIN32
+extern char** environ;
+#endif
+
 namespace {
+constexpr std::string_view GuestEnvironmentPrefix = "_APS5_";
+
 struct EnvironmentEntry {
     std::unique_ptr<char[]> owned;
     std::size_t capacity = 0;
@@ -29,10 +35,15 @@ struct GuestEnvironment {
     char*** storage = &fallback;
     std::vector<EnvironmentEntry> owned;
     std::unique_ptr<char*[]> published;
+    bool seeded = false;
 };
+
+void SeedFromHost(GuestEnvironment& environment);
 
 GuestEnvironment& Environment() {
     static GuestEnvironment state;
+    static const bool seeded = (SeedFromHost(state), true);
+    (void)seeded;
     return state;
 }
 
@@ -65,6 +76,49 @@ std::unique_ptr<char*[]> Table(const std::vector<char*>& entries) {
 void Publish(GuestEnvironment& environment, std::unique_ptr<char*[]> table) {
     environment.published.swap(table);
     *environment.storage = environment.published.get();
+}
+
+char** HostEnvironment() {
+#ifdef _WIN32
+    return _environ;
+#else
+    return ::environ;
+#endif
+}
+
+void SeedFromHost(GuestEnvironment& environment) {
+    if (environment.seeded) return;
+    environment.seeded = true;
+    char** source = HostEnvironment();
+    if (source == nullptr) return;
+    std::vector<EnvironmentEntry> created;
+    std::vector<char*> entries;
+    try {
+        for (; *source != nullptr; ++source) {
+            const char* text = *source;
+            const char* separator = text == nullptr ? nullptr : std::strchr(text, '=');
+            if (separator == nullptr || separator == text) continue;
+            const std::string_view name(text, static_cast<std::size_t>(separator - text));
+            if (!name.starts_with(GuestEnvironmentPrefix) || name.size() == GuestEnvironmentPrefix.size()) continue;
+            const std::string_view guest = name.substr(GuestEnvironmentPrefix.size());
+            const std::string_view value(separator + 1);
+            const std::size_t bytes = guest.size() + value.size() + 2;
+            EnvironmentEntry entry;
+            entry.owned = std::make_unique<char[]>(bytes);
+            entry.capacity = bytes;
+            std::memcpy(entry.owned.get(), guest.data(), guest.size());
+            entry.owned[guest.size()] = '=';
+            std::memcpy(entry.owned.get() + guest.size() + 1, value.data(), value.size());
+            entry.owned[bytes - 1] = '\0';
+            entries.push_back(entry.owned.get());
+            created.push_back(std::move(entry));
+        }
+        if (entries.empty()) return;
+        auto table = Table(entries);
+        for (auto& entry : created) environment.owned.push_back(std::move(entry));
+        Publish(environment, std::move(table));
+    } catch (const std::bad_alloc&) {
+    }
 }
 
 bool Contains(const EnvironmentEntry& entry, const char* pointer) {

@@ -825,6 +825,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_WATCH_ADDR` | integer | `core/libs/prx/libc/src/specifics/windows/CrashReport.cpp` |  | absolute hex address whose writes are reported after its page is committed |
 | `APS5_WATCH_WRITE` | integer | `core/libs/prx/libc/src/specifics/windows/CrashReport.cpp` |  | guest ELF vaddr whose 8-byte writes are reported by single-stepping the protected page |
 | `APS5_WRITE_WATCH_FAULT_AHEAD` | integer | `core/libs/prx/libc/src/GuestWriteWatch.cpp` | 32 | on macOS, at most this many pages, up to the end of the faulting page's 64 KiB block, that a write fault unprotects and records as written when the two pages before it were written since the last collection; 0 or 1 unprotects only the faulting page |
+| `APS5_WRITE_WATCH_PAGE_STATE_LIMIT` | integer | `core/libs/prx/libc/src/GuestWriteWatch.cpp` | 65536 | on Linux, the number of per-page trap records the read watch keeps before it drops the ones whose trap was released more than a few thousand releases ago; the record a late fault needs is kept |
 
 ### libkernel
 

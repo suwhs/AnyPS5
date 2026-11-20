@@ -138,15 +138,27 @@ std::shared_ptr<const ShaderSnapshot> ReadRawShader(std::uint64_t address, const
     throw std::runtime_error("AGC driver: raw shader program has no reachable end within mapped code or the size limit");
 }
 
+namespace {
+
+std::uint64_t UserDataTailAddress(const ShaderRecompiler::UserDataTail& tail, std::uint32_t userDataBase, std::span<const std::uint32_t> userData) {
+    const auto slot = tail.userDataRegister - userDataBase;
+    const auto high = tail.constantHigh ? *tail.constantHigh : userData[slot + 1u];
+    const auto address = static_cast<std::uint64_t>(userData[slot]) | (static_cast<std::uint64_t>(high) << 32u);
+    require(address != 0 && (address & 3u) == 0u, "user-data tail continuation address is null or not dword aligned");
+    return address;
+}
+
+std::shared_ptr<const ShaderSnapshot> ReadUserDataTailAt(const ShaderRecompiler::UserDataTail& tail, std::uint32_t userDataBase, std::span<const std::uint32_t> userData) {
+    return ReadRawShader(UserDataTailAddress(tail, userDataBase, userData));
+}
+
+}
+
 std::shared_ptr<const ShaderSnapshot> ReadUserDataTailContinuation(std::span<const std::uint32_t> code, std::uint32_t userDataBase, std::span<const std::uint32_t> userData) {
     const auto program = ShaderRecompiler::RdnaInstructionDecoder{}.Decode(code);
     const auto tail = ShaderRecompiler::FindUserDataTail(program, userDataBase, static_cast<std::uint32_t>(userData.size()));
     if (!tail) return nullptr;
-    const auto slot = tail->userDataRegister - userDataBase;
-    const auto high = tail->constantHigh ? *tail->constantHigh : userData[slot + 1u];
-    const auto address = userData[slot] | (static_cast<std::uint64_t>(high) << 32u);
-    require(address != 0 && (address & 3u) == 0u, "user-data tail continuation address is null or not dword aligned");
-    return ReadRawShader(address);
+    return ReadUserDataTailAt(*tail, userDataBase, userData);
 }
 
 std::shared_ptr<const ShaderSnapshot> ProgramSnapshot(const ShaderRegistry& shaders, std::uint64_t address, std::initializer_list<std::uint8_t> types) {
@@ -965,18 +977,94 @@ struct UserDataCallSites {
     std::vector<ShaderRecompiler::TableCall> tableCalls;
 };
 
+struct PreparedShaderState::GraphicsUserDataTailCache {
+    struct Continuation {
+        std::weak_ptr<const ShaderSnapshot> source;
+        std::shared_ptr<const ShaderRecompiler::RdnaProgram> program;
+    };
+    struct Entry {
+        std::size_t codeOffset;
+        std::uint32_t userDataBaseRegister;
+        std::uint32_t userDataCount;
+        std::shared_ptr<const ShaderRecompiler::RdnaProgram> program;
+        std::optional<ShaderRecompiler::UserDataTail> tail;
+        std::vector<std::pair<std::uint64_t, Continuation>> continuations;
+    };
+    std::vector<Entry> entries;
+};
+
 namespace {
 
 constexpr std::size_t UserDataLinksPerProgram = 8u;
+constexpr std::size_t GraphicsUserDataTailsPerProgram = 8u;
+constexpr std::size_t GraphicsUserDataContinuationsPerEntry = 8u;
 
-std::vector<std::uint32_t> LinkGraphicsUserDataTail(const ShaderRecompiler::RecompileRequest& request, const ShaderSnapshot& snapshot) {
+std::vector<std::uint32_t> LinkGraphicsUserDataTail(const ShaderRecompiler::RecompileRequest& request, const ShaderSnapshot& snapshot, std::size_t codeOffset) {
     using Stage = ShaderRecompiler::ShaderStage;
     if ((request.shader.stage != Stage::Vertex && request.shader.stage != Stage::Fragment) || !request.shader.header.empty() || !snapshot.userDataTailRegister) return {};
-    const auto program = ShaderRecompiler::RdnaInstructionDecoder{}.Decode(request.shader.code);
-    const auto tail = ShaderRecompiler::FindUserDataTail(program, request.context.userDataBaseRegister, static_cast<std::uint32_t>(request.context.userData.size()));
+    const auto userDataBaseRegister = request.context.userDataBaseRegister;
+    const auto userDataCount = static_cast<std::uint32_t>(request.context.userData.size());
+    const auto matches = [&](const PreparedShaderState::GraphicsUserDataTailCache::Entry& entry) {
+        return entry.codeOffset == codeOffset && entry.userDataBaseRegister == userDataBaseRegister && entry.userDataCount == userDataCount;
+    };
+    std::shared_ptr<const ShaderRecompiler::RdnaProgram> program;
+    std::optional<ShaderRecompiler::UserDataTail> tail;
+    {
+        std::lock_guard lock(snapshot.prepared->mutex);
+        const auto& cache = snapshot.prepared->graphicsUserDataTails;
+        if (cache != nullptr) {
+            for (const auto& entry : cache->entries) {
+                if (!matches(entry)) continue;
+                program = entry.program;
+                tail = entry.tail;
+                break;
+            }
+        }
+    }
+    if (program == nullptr) {
+        auto decoded = std::make_shared<const ShaderRecompiler::RdnaProgram>(ShaderRecompiler::RdnaInstructionDecoder{}.Decode(request.shader.code));
+        auto found = ShaderRecompiler::FindUserDataTail(*decoded, userDataBaseRegister, userDataCount);
+        std::lock_guard lock(snapshot.prepared->mutex);
+        auto& cache = snapshot.prepared->graphicsUserDataTails;
+        if (cache == nullptr) cache = std::make_shared<PreparedShaderState::GraphicsUserDataTailCache>();
+        if (cache->entries.size() >= GraphicsUserDataTailsPerProgram) cache->entries.erase(cache->entries.begin());
+        cache->entries.push_back({codeOffset, userDataBaseRegister, userDataCount, decoded, found, {}});
+        program = std::move(decoded);
+        tail = found;
+    }
     if (!tail) return {};
-    const auto continuation = ReadUserDataTailContinuation(request.shader.code, request.context.userDataBaseRegister, request.context.userData);
-    return ShaderRecompiler::LinkUserDataTail(program, *tail, ShaderRecompiler::RdnaInstructionDecoder{}.Decode(continuation->code));
+    const auto address = UserDataTailAddress(*tail, userDataBaseRegister, request.context.userData);
+    const auto continuation = ReadRawShader(address);
+    std::shared_ptr<const ShaderRecompiler::RdnaProgram> continuationProgram;
+    {
+        std::lock_guard lock(snapshot.prepared->mutex);
+        const auto& cache = snapshot.prepared->graphicsUserDataTails;
+        if (cache != nullptr) {
+            for (const auto& entry : cache->entries) {
+                if (!matches(entry)) continue;
+                for (const auto& [cachedAddress, cached] : entry.continuations) {
+                    if (cachedAddress != address) continue;
+                    if (cached.source.lock() == continuation) continuationProgram = cached.program;
+                    break;
+                }
+                break;
+            }
+        }
+    }
+    if (continuationProgram == nullptr) {
+        continuationProgram = std::make_shared<const ShaderRecompiler::RdnaProgram>(ShaderRecompiler::RdnaInstructionDecoder{}.Decode(continuation->code));
+        std::lock_guard lock(snapshot.prepared->mutex);
+        auto& cache = snapshot.prepared->graphicsUserDataTails;
+        if (cache != nullptr) {
+            for (auto& entry : cache->entries) {
+                if (!matches(entry)) continue;
+                if (entry.continuations.size() >= GraphicsUserDataContinuationsPerEntry) entry.continuations.erase(entry.continuations.begin());
+                entry.continuations.push_back({address, {continuation, continuationProgram}});
+                break;
+            }
+        }
+    }
+    return ShaderRecompiler::LinkUserDataTail(*program, *tail, *continuationProgram);
 }
 
 std::string hexText(std::uint64_t value) {
@@ -1369,7 +1457,7 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
     if (linking != nullptr) *linking = link != nullptr && !link->dependencies.empty() ? link : nullptr;
     const auto shared = link != nullptr ? link->linked : nullptr;
     ShaderRecompiler::LinkedCalls tail;
-    if (shared == nullptr || shared->code.empty()) tail.code = LinkGraphicsUserDataTail(request, snapshot);
+    if (shared == nullptr || shared->code.empty()) tail.code = LinkGraphicsUserDataTail(request, snapshot, codeOffset);
     const auto& linked = shared != nullptr && tail.code.empty() ? *shared : tail;
     auto source = request;
     if (!linked.code.empty()) {

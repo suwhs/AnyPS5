@@ -7057,6 +7057,10 @@ std::span<const std::byte> bufferBytes(VkBuffer buffer) {
     return mockBufferMemory(buffer);
 }
 
+std::span<const std::byte> descriptorBytes(const VkDescriptorBufferInfo& descriptor) {
+    return mockBufferMemory(descriptor.buffer).subspan(static_cast<std::size_t>(descriptor.offset), static_cast<std::size_t>(descriptor.range));
+}
+
 void expectResourceFailure(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, std::string_view reason) {
     mock = MockVulkan{};
     const auto context = mockContext();
@@ -7678,9 +7682,9 @@ void resourceTests() {
         Require(array.buffers[0].offset == 0 && array.buffers[0].range == 16 && array.buffers[1].offset == 0 && array.buffers[1].range == 32, "guest buffers must be bound at zero offset with their descriptor size");
         Require(sameBytes(bufferBytes(array.buffers[0].buffer), guestFirst.data(), 16) && sameBytes(bufferBytes(array.buffers[1].buffer), guestSecond.data(), 32), "guest buffer contents were not uploaded");
         const auto data = ShaderDataWords({7, 8, 9});
-        Require(findWrite(5).buffers.size() == 1 && findWrite(5).buffers[0].range == data.size() * 4u && sameBytes(bufferBytes(findWrite(5).buffers[0].buffer), data.data(), data.size() * 4u), "shader data buffer is incorrect");
+        Require(findWrite(5).buffers.size() == 1 && findWrite(5).buffers[0].range == data.size() * 4u && sameBytes(descriptorBytes(findWrite(5).buffers[0]), data.data(), data.size() * 4u), "shader data buffer is incorrect");
         const std::array<std::uint32_t, 2> srt{1, 2};
-        Require(findWrite(43).buffers.size() == 1 && findWrite(43).buffers[0].range == 8 && sameBytes(bufferBytes(findWrite(43).buffers[0].buffer), srt.data(), 8), "flattened SRT buffer is incorrect");
+        Require(findWrite(43).buffers.size() == 1 && findWrite(43).buffers[0].range == 8 && sameBytes(descriptorBytes(findWrite(43).buffers[0]), srt.data(), 8), "flattened SRT buffer is incorrect");
         Require(findWrite(44).buffers.size() == 1 && findWrite(44).buffers[0].range == 8 && sameBytes(bufferBytes(findWrite(44).buffers[0].buffer), guestThird.data(), 8), "fragment guest buffer is incorrect");
         resources.Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, VK_NULL_HANDLE);
         Require(mock.boundPoint == VK_PIPELINE_BIND_POINT_GRAPHICS && mock.boundFirst == 0 && mock.boundSets == 1, "exactly one descriptor set must be bound at set zero");

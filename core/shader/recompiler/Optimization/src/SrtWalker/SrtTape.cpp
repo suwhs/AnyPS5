@@ -573,22 +573,11 @@ bool SrtTape::Run(const IrResourcePlan& plan, const SrtRuntime& runtime, std::ve
     constexpr std::size_t InlineNodes = 512;
     std::array<std::uint64_t, InlineNodes> inlineValues;
     std::array<std::uint8_t, InlineNodes> inlineStates;
-    std::vector<std::uint64_t> heapValues;
-    std::vector<std::uint8_t> heapStates;
-    std::uint64_t* values = inlineValues.data();
-    std::uint8_t* states = inlineStates.data();
-    if (nodes.size() > InlineNodes) {
-        heapValues.resize(nodes.size());
-        heapStates.assign(nodes.size(), 0u);
-        values = heapValues.data();
-        states = heapStates.data();
-    } else {
-        std::fill_n(states, nodes.size(), std::uint8_t {0});
-    }
-    Frame frame {runtime, values, states};
 
     struct Scratch {
         std::uint32_t attempt = 0;
+        std::vector<std::uint64_t> heapValues;
+        std::vector<std::uint8_t> heapStates;
         std::vector<std::uint8_t> active;
         std::vector<std::uint8_t> activeFlat;
         std::vector<std::uint8_t> visited;
@@ -598,6 +587,18 @@ bool SrtTape::Run(const IrResourcePlan& plan, const SrtRuntime& runtime, std::ve
     };
     struct ScratchStorage {};
     auto& scratch = HostThreadLocal<Scratch, ScratchStorage>();
+    std::uint64_t* values = inlineValues.data();
+    std::uint8_t* states = inlineStates.data();
+    if (nodes.size() > InlineNodes) {
+        scratch.heapValues.resize(nodes.size());
+        scratch.heapStates.assign(nodes.size(), 0u);
+        values = scratch.heapValues.data();
+        states = scratch.heapStates.data();
+    } else {
+        std::fill_n(states, nodes.size(), std::uint8_t {0});
+    }
+    Frame frame {runtime, values, states};
+
     struct AttemptScope {
         std::uint32_t& depth;
         ~AttemptScope() { --depth; }
@@ -698,7 +699,7 @@ bool SrtTape::Run(const IrResourcePlan& plan, const SrtRuntime& runtime, std::ve
     }
     results.swap(evaluated);
     activeSources.swap(active);
-    flat.assign(flattened.begin(), flattened.end());
+    flat.swap(flattened);
     return true;
 }
 

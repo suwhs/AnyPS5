@@ -70,6 +70,8 @@ public:
         return _pagemap >= 0;
     }
 
+    bool Watching() const { return _pagemap >= 0; }
+
     void Register(std::uintptr_t begin, std::uintptr_t end) {
         if (!Available() || end <= begin) return;
         t_registrationFailure[0] = '\0';
@@ -120,13 +122,13 @@ public:
     }
 
     bool Covers(std::uintptr_t begin, std::uintptr_t end) {
-        if (!Available()) return false;
+        if (!Watching()) return false;
         std::shared_lock lock(_lock);
         return covers(begin, end);
     }
 
     bool Overlaps(std::uintptr_t begin, std::uintptr_t end) {
-        if (!Available()) return false;
+        if (!Watching()) return false;
         std::shared_lock lock(_lock);
         const auto next = _ranges.upper_bound(begin);
         return (next != _ranges.begin() && std::prev(next)->second > begin) || (next != _ranges.end() && next->first < end);

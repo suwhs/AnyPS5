@@ -202,11 +202,13 @@ class ShaderResources {
 public:
     ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes);
     ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots = {}, bool deviceStaging = false);
+    ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots, bool deviceStaging, bool deferred);
     ShaderResources(const Context& context, const CompiledShader& compute, std::span<const GuestMemorySnapshot> snapshots = {});
-    // Two-stage build for dispatches (see build): with `deferred` the constructor runs stage A only,
-    // which needs no device lock, and Complete() runs stage B under GuestMemory::GpuMutex; until
-    // then no other member may be used. `compute` and `snapshots` must outlive Complete(). An
-    // address-based shader (BDA tables) builds entirely in Complete(): its lease acquisition
+    // Two-stage builds (see build): with `deferred` the constructor runs stage A only, which needs
+    // no device lock, and Complete() runs stage B under GuestMemory::GpuMutex; until then no other
+    // member may be used. A dispatch holds `compute` and the snapshots by reference, so they must
+    // outlive Complete(); a draw build (the nine-argument constructor) copies its inputs instead.
+    // An address-based build (BDA tables) runs entirely in Complete(): its lease acquisition
     // reconciles imports and refreshes mirrors, which needs the lock.
     ShaderResources(const Context& context, const CompiledShader& compute, std::span<const GuestMemorySnapshot> snapshots, bool deferred, std::uint64_t dispatchThreads = 0, std::optional<std::pair<std::uint64_t, std::size_t>> htileClear = std::nullopt);
     void Complete();
@@ -846,6 +848,15 @@ private:
     // the build (Complete() for a deferred one) is done, and reset then (forgetDeferredInputs).
     CompiledShader deferredCompute{};
     std::span<const GuestMemorySnapshot> deferredSnapshots;
+    // The draw constructor's deferred build inputs, copied in stage A and released after Complete().
+    std::vector<CompiledShader> deferredDrawShaders;
+    ColorTarget deferredDrawTarget{};
+    std::uint32_t deferredColorAttachments = 0;
+    std::uint64_t deferredIndexAddress = 0;
+    std::size_t deferredIndexBytes = 0;
+    std::vector<GuestMemorySnapshot> deferredDrawSnapshots;
+    bool deferredDraw = false;
+    void forgetDeferredDrawInputs();
     // The deferred build is address-based: everything runs in Complete().
     bool lockedBuild = false;
     // Stage A runs without the device lock (a deferred, non-address-based build).

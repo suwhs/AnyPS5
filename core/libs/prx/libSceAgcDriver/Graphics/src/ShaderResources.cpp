@@ -2059,6 +2059,31 @@ ShaderResources::ShaderResources(const Context& context, std::span<const Compile
     build(shaders, &target, colorAttachments, indexAddress, indexBytes);
 }
 
+ShaderResources::ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots, bool deviceStaging, bool deferred) : context(context), guestMemory(context) {
+    drawBuild = true;
+    const bool addressTables = std::ranges::any_of(shaders, [](const CompiledShader& shader) { return shader.program != nullptr && std::ranges::any_of(shader.program->bindings, [](const auto& binding) { return binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable; }); });
+    if (deviceStaging && !addressTables) guestMemory.AllowDeviceStaging();
+    deferredDrawShaders.assign(shaders.begin(), shaders.end());
+    deferredDrawTarget = target;
+    deferredColorAttachments = colorAttachments;
+    deferredIndexAddress = indexAddress;
+    deferredIndexBytes = indexBytes;
+    deferredDrawSnapshots.assign(snapshots.begin(), snapshots.end());
+    deferredDraw = true;
+    lockedBuild = addressTables;
+    if (!deferred) {
+        const std::span<const CompiledShader> built(deferredDrawShaders);
+        prepareAddressBindings(built, deferredDrawSnapshots);
+        build(built, &deferredDrawTarget, colorAttachments, indexAddress, indexBytes);
+        forgetDeferredDrawInputs();
+        return;
+    }
+    if (lockedBuild) return;
+    const std::span<const CompiledShader> built(deferredDrawShaders);
+    prepareAddressBindings(built, deferredDrawSnapshots);
+    buildPrepare(built, &deferredDrawTarget, colorAttachments, indexAddress, indexBytes);
+}
+
 ShaderResources::ShaderResources(const Context& context, const CompiledShader& compute, std::span<const GuestMemorySnapshot> snapshots) : ShaderResources(context, compute, snapshots, false) {}
 
 namespace {
@@ -2100,6 +2125,23 @@ ShaderResources::ShaderResources(const Context& context, const CompiledShader& c
 }
 
 void ShaderResources::Complete() {
+    if (deferredDraw) {
+        Require(!completed, "draw resources were already completed");
+        const std::span<const CompiledShader> shaders(deferredDrawShaders);
+        if (lockedBuild) {
+            prepareAddressBindings(shaders, deferredDrawSnapshots);
+            buildPrepare(shaders, &deferredDrawTarget, deferredColorAttachments, deferredIndexAddress, deferredIndexBytes);
+        }
+        buildComplete();
+        if (!GuestMemory::WriteIndexEnabled()) {
+            forgetDeferredDrawInputs();
+            return;
+        }
+        countIndex(IndexBuilds);
+        { PerformanceTimer subscribeTiming("Resources.Subscribe"); subscribeBuilt(shaders); }
+        forgetDeferredDrawInputs();
+        return;
+    }
     Require(!completed, "shader resources were already completed");
     const std::span<const CompiledShader> shaders(&deferredCompute, 1);
     if (lockedBuild) {
@@ -2108,6 +2150,14 @@ void ShaderResources::Complete() {
     }
     buildComplete();
     forgetDeferredInputs();
+}
+
+void ShaderResources::forgetDeferredDrawInputs() {
+    deferredDrawShaders.clear();
+    deferredDrawShaders.shrink_to_fit();
+    deferredDrawSnapshots.clear();
+    deferredDrawSnapshots.shrink_to_fit();
+    deferredDraw = false;
 }
 
 void ShaderResources::forgetDeferredInputs() {

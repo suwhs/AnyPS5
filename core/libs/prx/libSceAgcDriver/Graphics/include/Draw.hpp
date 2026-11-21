@@ -3,6 +3,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_DRAW_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_DRAW_HPP
 
+#include "prx/libSceAgcDriver/Graphics/include/PreparePool.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Recipe.hpp"
@@ -36,7 +37,18 @@ struct DrawTraceContext {
 // `recipe`, when given, receives the DrawRecipe a recorded, cacheable, reusable, non-indirect draw
 // built for its draw-cache entry (design_cpu_final M8; null otherwise, and always under
 // APS5_NO_DRAW_RECIPE=1).
-void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots = {}, std::shared_ptr<const DrawRecipe>* recipe = nullptr, const DrawTraceContext* trace = nullptr, std::uint64_t shape = 0, const std::vector<std::uint32_t>* contentKey = nullptr);
+// `prepared`, when given, carries a draw build whose stage A a pool worker ran without the device
+// lock: Draw completes it (stage B) under the lock instead of building inline, and builds inline
+// whenever the slot's staging flag does not match its own `recordable && drawStagingEnabled()`.
+// The dispatcher's state, draw, shaders and snapshots are the same objects the commit consumes, so
+// only that flag can differ.
+void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots = {}, std::shared_ptr<const DrawRecipe>* recipe = nullptr, const DrawTraceContext* trace = nullptr, std::uint64_t shape = 0, const std::vector<std::uint32_t>* contentKey = nullptr, PreparedStageA* prepared = nullptr);
+// Dispatches stage A of the draw's resource build to the prepare pool (APS5_PREPARE_WORKERS), the
+// caller keeping the state, shaders and snapshots alive through the consume. The staging flag is
+// derived from the draw-staging switches alone, so a slot whose consumer would not be recordable is
+// dropped at the consume and the commit builds inline. Returns null when the pool is off, the draw
+// cannot be pooled or no worker has headroom.
+std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots);
 std::vector<std::uint32_t> DrawResourceContentKey(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders);
 
 struct PixelFunctionLdsLayouts {

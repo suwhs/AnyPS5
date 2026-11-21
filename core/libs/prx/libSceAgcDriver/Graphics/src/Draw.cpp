@@ -2294,7 +2294,7 @@ bool drawStagingEnabled() {
     return !disabled;
 }
 
-ResolvedResources resolveDrawResources(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, std::uint64_t indexBytes, bool recordable, const DrawPlan& plan, DrawOutcome& outcome, DrawTimer& timer) {
+ResolvedResources resolveDrawResources(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, std::uint64_t indexBytes, bool recordable, const DrawPlan& plan, DrawOutcome& outcome, DrawTimer& timer, PreparedStageA* stageA) {
     ResolvedResources resolved;
     APS5_LOG_CHARS_OUT_DEBUG("Creating ShaderResources");
     // A recordable draw whose stages' compiled content repeats an earlier one binds that build's
@@ -2376,7 +2376,16 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
     }
     timer.phase(PhaseLookup);
     if (resolved.resources == nullptr) {
-        resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots, recordable && drawStagingEnabled());
+        const bool staging = recordable && drawStagingEnabled();
+        const bool pooled = stageA != nullptr && stageA->staging == staging && stageA->resources != nullptr;
+        if (pooled) {
+            stageA->Wait();
+            if (stageA->failure != nullptr) std::rethrow_exception(stageA->failure);
+            resolved.resources = std::move(stageA->resources);
+            resolved.resources->Complete();
+        } else {
+            resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots, staging);
+        }
         resolved.built = &resolved.resources->Timing();
         outcome.addressBased = resolved.resources->HoldsLease();
         outcome.kind = outcome.addressBased ? KindBda : KindBuild;
@@ -3942,7 +3951,7 @@ const char* targetObligation(const Context& context, const State& state, std::sp
     return repeatedDepth ? DepthTargetObligation(context, *state.depth, state.depthWrite) : nullptr;
 }
 
-bool prepareDraw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, PreparedDraw& prepared) {
+bool prepareDraw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, PreparedDraw& prepared, PreparedStageA* stageA) {
     auto*& recipeOut = prepared.recipeOut;
     auto& stencilReferences = prepared.stencilReferences;
     for (const auto& shader : shaders) {
@@ -4225,7 +4234,7 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
     auto* recorder = prepared.recorder = Recorder::Active();
     bool recordable = recordDraws && recorder != nullptr && dumpLimit == 0 && std::all_of(targets.begin(), targets.end(), [](const TargetBinding& binding) { return binding.resident != nullptr || binding.multisampled; });
     auto& resolved = prepared.resolved;
-    resolved = resolveDrawResources(context, state, draw, shaders, snapshots, indexBytes, recordable, plan, outcome, timer);
+    resolved = resolveDrawResources(context, state, draw, shaders, snapshots, indexBytes, recordable, plan, outcome, timer, stageA);
     if (stopAfterResolve.load(std::memory_order_relaxed) != 0) {
         const auto stop = stopAfterResolve.exchange(0, std::memory_order_relaxed);
         if (stop == 1) return false;
@@ -4958,7 +4967,33 @@ std::vector<std::uint32_t> DrawResourceContentKey(const Context& context, const 
     return DrawResourceKey(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, indexBytes, !trimKey);
 }
 
-void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>* recipeOut, const DrawTraceContext* trace, std::uint64_t shape, const std::vector<std::uint32_t>* contentKey) {
+std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
+    if (!PreparePoolEnabled() || PreparePool::Get().InFlight() >= PrepareWorkers()) return nullptr;
+    auto slot = std::make_shared<PreparedStageA>();
+    slot->staging = RecordDraws() && DumpTargetLimit() == 0 && drawStagingEnabled();
+    const auto target = state.color;
+    const auto colors = static_cast<std::uint32_t>(state.colors.size());
+    const auto indexAddress = draw.indexAddress;
+    const auto indexBytes = static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize;
+    const auto staging = slot->staging;
+    auto captured = std::vector<GuestMemorySnapshot>(snapshots.begin(), snapshots.end());
+    auto stageShaders = std::vector<CompiledShader>(shaders.begin(), shaders.end());
+    PreparePool::Get().Enqueue([slot, context, target, colors, indexAddress, indexBytes, staging, captured = std::move(captured), stageShaders = std::move(stageShaders)]() mutable {
+        try {
+            slot->resources = std::make_shared<ShaderResources>(context, stageShaders, target, colors, indexAddress, static_cast<std::size_t>(indexBytes), captured, staging, true);
+        } catch (...) {
+            slot->failure = std::current_exception();
+        }
+        {
+            std::lock_guard lock(slot->waitMutex);
+            slot->done.store(true, std::memory_order_release);
+        }
+        slot->waitDone.notify_all();
+    });
+    return slot;
+}
+
+void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>* recipeOut, const DrawTraceContext* trace, std::uint64_t shape, const std::vector<std::uint32_t>* contentKey, PreparedStageA* stageA) {
     const DepthCopySourceScope depthCopySource(state.depthCopySource);
     if (state.stages.tessellationGeometry) {
         drawTessellationGeometry(context, state, draw, shaders, snapshots, trace);
@@ -5004,7 +5039,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         }
     } heldSpace{prepared};
     try {
-        if (prepareDraw(context, state, draw, shaders, snapshots, prepared)) recordPreparedDraw(context, state, draw, shaders, prepared);
+        if (prepareDraw(context, state, draw, shaders, snapshots, prepared, stageA)) recordPreparedDraw(context, state, draw, shaders, prepared);
     } catch (...) {
         ThreadTargetMemo().Invalidate();
         keepHeldSpace(prepared);

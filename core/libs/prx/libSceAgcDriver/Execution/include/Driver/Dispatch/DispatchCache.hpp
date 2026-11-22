@@ -80,7 +80,19 @@ struct DispatchVariant {
     std::vector<ShaderRecompiler::MemoryRegion> captured;
     std::vector<std::pair<std::uint64_t, std::size_t>> spans;
     std::atomic<std::uint64_t> generation{0};
+    std::atomic<std::uint64_t> viewsSerial{0};
+    std::atomic<bool> viewsCurrent{false};
 };
+
+inline bool ViewsCurrent(DispatchVariant& variant) {
+    const auto generation = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+    const auto serial = variant.viewsSerial.load(std::memory_order_relaxed);
+    if (serial == generation) return variant.viewsCurrent.load(std::memory_order_relaxed);
+    const bool current = variant.registeredViews == nullptr || CaptureRegisteredViewsCurrent(*variant.registeredViews);
+    variant.viewsCurrent.store(current, std::memory_order_relaxed);
+    variant.viewsSerial.store(generation, std::memory_order_relaxed);
+    return current;
+}
 
 struct DispatchEntry {
     std::vector<std::shared_ptr<DispatchVariant>> variants;

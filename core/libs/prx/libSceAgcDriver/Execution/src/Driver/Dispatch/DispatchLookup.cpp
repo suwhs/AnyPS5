@@ -38,7 +38,7 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
                 std::optional<SampledReadScope> sampling;
 
                 for (std::size_t i = 0; i < variants.size(); ++i) {
-                    if (variants[i]->registeredViews != nullptr && !CaptureRegisteredViewsCurrent(*variants[i]->registeredViews)) continue;
+                    if (!ViewsCurrent(*variants[i])) continue;
                     regions.clear();
                     appendEntryRegions(*variants[i], regions);
                     ++compared;
@@ -60,7 +60,7 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
                 current = variant != nullptr;
             } else {
                 variant = variants.front();
-                current = variant->registeredViews == nullptr || CaptureRegisteredViewsCurrent(*variant->registeredViews);
+                current = ViewsCurrent(*variant);
                 if (!current) variant.reset();
                 if (variant != nullptr) {
                     compared = 1;

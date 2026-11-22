@@ -2244,7 +2244,7 @@ bool Recorder::defers() const {
         const char* value = std::getenv("APS5_RECORD_INLINE");
         return value != nullptr && std::strcmp(value, "0") != 0;
     }();
-    return deferring && !recordInline && !RuntimeSwitches::Set(RuntimeSwitch::DirectBatches);
+    return deferring && !recordInline && !RuntimeSwitches::Set(RuntimeSwitch::DirectBatches) && !RuntimeSwitches::Set(RuntimeSwitch::NoCommandThunks);
 }
 
 VkCommandBuffer Recorder::allocateBegun() {
@@ -2355,12 +2355,12 @@ void Recorder::ensureOpen() {
                     throw;
                 }
                 batch->commands = batch->stream->Handle();
-                batch->functions = &streamedCommands;
+                batch->functions = RuntimeSwitches::Set(RuntimeSwitch::NoBatchTable) ? nullptr : &streamedCommands;
                 deferredBatches.fetch_add(1, std::memory_order_relaxed);
             } else {
                 batch->real = allocateBegun();
                 batch->commands = batch->real;
-                batch->functions = realResolved ? &directCommands : nullptr;
+                batch->functions = !realResolved || RuntimeSwitches::Set(RuntimeSwitch::NoBatchTable) ? nullptr : &directCommands;
                 directBatches.fetch_add(1, std::memory_order_relaxed);
             }
             if (!fenceless) {

@@ -8,6 +8,7 @@
 #include <vulkan/vulkan.h>
 #include "prx/libc/include/PrimedSharedMutex.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/CommandList.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -529,7 +530,7 @@ private:
         ++DeviceProcLookups();
         const auto function = deviceProc(device, name);
         if (function == nullptr) throw std::runtime_error(std::string("AGC graphics: missing Vulkan function: ") + name);
-        if (IsCommandName(name)) return reinterpret_cast<TFunction>(CommandThunk(name, function, device));
+        if (IsCommandName(name) && !RuntimeSwitches::Set(RuntimeSwitch::NoCommandThunks)) return reinterpret_cast<TFunction>(CommandThunk(name, function, device));
         return reinterpret_cast<TFunction>(function);
     }
 

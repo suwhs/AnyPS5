@@ -13,8 +13,9 @@ namespace {
 constexpr std::size_t PrepareWorkerLimit = 32;
 
 std::size_t ParsePrepareWorkers() {
+    constexpr std::size_t DefaultPrepareWorkers = 2;
     const char* text = std::getenv("APS5_PREPARE_WORKERS");
-    if (text == nullptr) return 0;
+    if (text == nullptr) return DefaultPrepareWorkers;
     const auto value = std::strtoull(text, nullptr, 10);
     return value == 0 ? 0 : static_cast<std::size_t>(std::min<unsigned long long>(value, PrepareWorkerLimit));
 }

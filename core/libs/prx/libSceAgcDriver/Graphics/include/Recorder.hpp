@@ -2,6 +2,8 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RECORDER_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/BarrierBatch.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/CommandList.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/SealedBatch.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PassHazards.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
@@ -64,9 +66,10 @@ public:
     CommandState(const CommandState&) = delete;
     CommandState& operator=(const CommandState&) = delete;
 
-    void Begin(VkCommandBuffer commands, bool suppress = true);
+    void Begin(VkCommandBuffer commands, bool suppress = true, const CommandFunctions* functions = nullptr);
     void Invalidate() noexcept;
     VkCommandBuffer Commands() const { return commands; }
+    const CommandFunctions* FunctionsFor(VkCommandBuffer recording, const Context& context) const noexcept { return recording == commands ? context.BatchFor(functions) : nullptr; }
     bool Known(Slot slot) const { return (valid & Mask(slot)) != 0; }
     VkPipeline BoundPipeline() const { return pipelineKnown ? pipeline : VK_NULL_HANDLE; }
     void BindPipeline(const Context& context, VkPipeline pipeline, std::uint32_t dynamicSlots);
@@ -108,6 +111,7 @@ private:
     void applyFaces(Slot first, VkStencilFaceFlags faces, std::array<TValue, 2> CommandState::*field, const TValue& value, TEmit emit);
 
     VkCommandBuffer commands = VK_NULL_HANDLE;
+    const CommandFunctions* functions = nullptr;
     std::uint32_t trackable = 0;
     std::uint32_t valid = 0;
     std::uint32_t overwritten = 0;
@@ -148,13 +152,42 @@ private:
 // up to serial S" WITHOUT the mutex (WaitSerial), because the monotonic value cannot be reset or
 // recycled the way the pooled batch fences are, and afterwards run the completions under the mutex
 // (FinishUpTo). Without timeline semaphores callers use the locked Sync as before.
-class Recorder {
+class Recorder : private StreamMaterializer {
 public:
     // `timelineSemaphores`: the device enabled VK_KHR_timeline_semaphore (WaitSerial is usable).
-    explicit Recorder(const Context& context, bool timelineSemaphores = false);
+    explicit Recorder(const Context& context, bool timelineSemaphores = false, bool deferredBatches = false, std::uint32_t queueFamily = 0);
     ~Recorder();
     Recorder(const Recorder&) = delete;
     Recorder& operator=(const Recorder&) = delete;
+
+    class UnwindPoison {
+    public:
+        explicit UnwindPoison(Recorder& recorder) : recorder(recorder), exceptions(std::uncaught_exceptions()) {}
+        ~UnwindPoison() {
+            if (std::uncaught_exceptions() > exceptions) recorder.poisonOpen();
+        }
+        UnwindPoison(const UnwindPoison&) = delete;
+        UnwindPoison& operator=(const UnwindPoison&) = delete;
+
+    private:
+        Recorder& recorder;
+        int exceptions;
+    };
+    UnwindPoison UnwindGuard() { return UnwindPoison(*this); }
+    struct StreamStatistics {
+        std::uint64_t deferred = 0;
+        std::uint64_t direct = 0;
+        std::uint64_t refused = 0;
+        std::uint64_t demoted = 0;
+        std::uint64_t poisoned = 0;
+        std::uint64_t replayed = 0;
+        std::uint64_t replayFailed = 0;
+    };
+    StreamStatistics StreamCounts() const;
+    std::vector<std::pair<std::string, std::uint64_t>> Demotions() const;
+    std::string StreamReport() const;
+    std::uint64_t StreamOps() const { return open != nullptr && open->stream != nullptr ? open->stream->Ops() : 0; }
+    bool Deferred() const { return open != nullptr && open->stream != nullptr && open->stream->Materialized() == VK_NULL_HANDLE; }
 
     // The open batch's command buffer, starting a batch when none is open. `coveredAccess`, when
     // given, receives the destination access mask of the last recorded command's trailing barrier
@@ -762,7 +795,11 @@ private:
         const Batch* batch = nullptr;
     };
     struct Batch {
+        std::unique_ptr<CommandStream> stream;
+        std::shared_ptr<SealedBatch> sealed;
+        VkCommandBuffer real = VK_NULL_HANDLE;
         VkCommandBuffer commands = VK_NULL_HANDLE;
+        const CommandFunctions* functions = nullptr;
         CommandState graphicsState;
         VkFence fence = VK_NULL_HANDLE;
         std::vector<std::shared_ptr<void>> kept;
@@ -1163,6 +1200,31 @@ private:
     std::shared_ptr<Buffer> containingDrawSnapshot(std::uint64_t address, std::size_t bytes, VkDeviceSize* offset);
     mutable std::weak_ptr<const WriteRanges> publishedWriteRanges;
     mutable bool publishedWriteRangesValid = false;
+    VkCommandBuffer Begin(CommandStream& stream) override;
+    VkCommandBuffer allocateBegun();
+    std::unique_ptr<ReplayExecutor> makeExecutor();
+    bool defers() const;
+    void poisonOpen() noexcept;
+    void overlayListed();
+    void noteDemotion(const Demotion& demotion);
+    CommandFunctions realCommands;
+    DeviceFunctions listedFunctions;
+    CommandFunctions directCommands;
+    CommandFunctions streamedCommands;
+    bool realResolved = false;
+    FailureLatch latch;
+    WorkBudget budget{WorkBudget::Limits{}};
+    std::unique_ptr<ReplayExecutor> executor;
+    std::uint32_t queueFamily = 0;
+    bool deferring = false;
+    std::atomic<std::uint64_t> deferredBatches{0};
+    std::atomic<std::uint64_t> directBatches{0};
+    std::atomic<std::uint64_t> demotedBatches{0};
+    std::atomic<std::uint64_t> poisonedBatches{0};
+    std::atomic<std::uint64_t> replayedBatches{0};
+    std::atomic<std::uint64_t> failedReplays{0};
+    mutable std::mutex demotionMutex;
+    std::map<std::string, std::uint64_t> demotions;
 };
 
 inline void EmitNvCheckpointToken(VkCommandBuffer commands, AgcDriver::FaultToken token, PFN_vkCmdSetCheckpointNV setCheckpoint) noexcept {

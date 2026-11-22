@@ -38,6 +38,17 @@ std::size_t PrepareQueueDepth() {
     return depth;
 }
 
+std::size_t PrepareQueueBytes() {
+    static const std::size_t bytes = [] {
+        constexpr std::size_t DefaultPrepareQueueMiB = 1536;
+        const char* text = std::getenv("APS5_PREPARE_INFLIGHT_MIB");
+        if (text == nullptr) return DefaultPrepareQueueMiB << 20u;
+        const auto value = std::strtoull(text, nullptr, 10);
+        return value == 0 ? std::size_t{0} : static_cast<std::size_t>(std::min<unsigned long long>(value, 65536)) << 20u;
+    }();
+    return bytes;
+}
+
 bool PreparePoolEnabled() {
     return PrepareWorkers() != 0;
 }
@@ -52,12 +63,13 @@ PreparePool& PreparePool::Get() {
     return *pool;
 }
 
-void PreparePool::Enqueue(Job job) {
+void PreparePool::Enqueue(Job job, std::size_t bytes) {
     bool spawn = false;
     {
         std::lock_guard lock(mutex);
         if (stopped) throw std::runtime_error("the prepare pool is stopped");
-        jobs.push_back(std::move(job));
+        jobs.push_back(Pending{std::move(job), bytes});
+        inFlightBytes += bytes;
         spawn = workers < PrepareWorkers() && workers < jobs.size() + busy;
         if (spawn) ++workers;
     }
@@ -80,6 +92,11 @@ std::size_t PreparePool::InFlight() {
     return busy + jobs.size();
 }
 
+std::size_t PreparePool::InFlightBytes() {
+    std::lock_guard lock(mutex);
+    return inFlightBytes;
+}
+
 void PreparePool::Drain() {
     std::exception_ptr failure;
     {
@@ -95,7 +112,7 @@ void PreparePool::Drain() {
 
 void PreparePool::RunWorker() {
     while (true) {
-        Job job;
+        Pending job;
         {
             std::unique_lock lock(mutex);
             wake.wait(lock, [&] { return stopped || !jobs.empty(); });
@@ -105,7 +122,7 @@ void PreparePool::RunWorker() {
             ++busy;
         }
         try {
-            job();
+            job.job();
         } catch (...) {
             std::lock_guard lock(mutex);
             failures.push_back(std::current_exception());
@@ -113,6 +130,7 @@ void PreparePool::RunWorker() {
         {
             std::lock_guard lock(mutex);
             --busy;
+            inFlightBytes -= job.bytes;
             idle.notify_all();
         }
     }

@@ -4989,9 +4989,18 @@ std::vector<std::uint32_t> DrawResourceContentKey(const Context& context, const 
     return DrawResourceKey(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, indexBytes, !trimKey);
 }
 
+std::size_t PooledBuildBytes(std::span<const GuestMemorySnapshot> snapshots) {
+    std::size_t bytes = 0;
+    for (const auto& snapshot : snapshots) bytes += snapshot.bytes.size();
+    return bytes;
+}
+
 std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, const std::vector<std::uint32_t>& contentKey) {
     if (!PreparePoolEnabled() || PreparePool::Get().InFlight() >= PrepareQueueDepth()) return nullptr;
     if (!contentKey.empty() && SharedResourceCache().Holds(contentKey)) return nullptr;
+    const auto pooledBytes = PooledBuildBytes(snapshots);
+    const auto byteBudget = PrepareQueueBytes();
+    if (byteBudget != 0 && PreparePool::Get().InFlightBytes() + pooledBytes > byteBudget) return nullptr;
     auto slot = std::make_shared<PreparedStageA>();
     slot->staging = RecordDraws() && DumpTargetLimit() == 0 && drawStagingEnabled();
     const auto target = state.color;
@@ -5013,7 +5022,7 @@ std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const 
             slot->done.store(true, std::memory_order_release);
         }
         slot->waitDone.notify_all();
-    });
+    }, pooledBytes);
     return slot;
 }
 

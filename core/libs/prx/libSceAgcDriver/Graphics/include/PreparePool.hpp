@@ -27,16 +27,18 @@ struct PreparedStageA {
 
 std::size_t PrepareWorkers();
 std::size_t PrepareQueueDepth();
+std::size_t PrepareQueueBytes();
 bool PreparePoolEnabled();
 
 class PreparePool {
 public:
     using Job = std::function<void()>;
     static PreparePool& Get();
-    void Enqueue(Job job);
+    void Enqueue(Job job, std::size_t bytes = 0);
     std::size_t Busy();
     std::size_t Queued();
     std::size_t InFlight();
+    std::size_t InFlightBytes();
     void Drain();
 
 private:
@@ -45,7 +47,12 @@ private:
     std::mutex mutex;
     std::condition_variable wake;
     std::condition_variable idle;
-    std::deque<Job> jobs;
+    struct Pending {
+        Job job;
+        std::size_t bytes = 0;
+    };
+    std::deque<Pending> jobs;
+    std::size_t inFlightBytes = 0;
     std::vector<std::exception_ptr> failures;
     std::size_t workers = 0;
     std::size_t busy = 0;

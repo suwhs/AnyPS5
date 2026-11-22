@@ -1,4 +1,5 @@
 #include "prx/libkernel/include/Api.hpp"
+#include "prx/libkernel/System/include/UserContext.hpp"
 #include "prx/libc/include/Api.hpp"
 #include "prx/libSceLibcInternal/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
@@ -26,7 +27,40 @@ static bool Same(const GuestSigaction& left, const GuestSigaction& right) {
 }
 volatile std::sig_atomic_t received = 0;
 volatile std::uintptr_t handlerReturn = 0;
-void APS5_VABI InfoCallback(int, void*, void*) {}
+volatile std::sig_atomic_t infoCalls = 0;
+volatile std::uintptr_t infoReturn = 0;
+volatile std::uintptr_t infoStack = 0;
+volatile std::uintptr_t infoMask = 0;
+volatile std::uint64_t infoLength = 0;
+volatile std::uint64_t infoFpFormat = 0;
+volatile std::uint64_t infoFpOwned = 0;
+volatile std::uint64_t infoCodeSelector = 0;
+volatile std::sig_atomic_t infoSigno = 0;
+volatile std::sig_atomic_t infoRecordSigno = 0;
+void APS5_VABI InfoCallback(int signal, void* info, void* context) {
+    infoCalls = infoCalls + 1;
+    infoSigno = signal;
+    infoRecordSigno = *static_cast<const std::int32_t*>(info);
+    auto* ucontext = static_cast<UserUcontext*>(context);
+    if (ucontext == nullptr) return;
+    infoReturn = ucontext->mcontext.rip;
+    infoStack = ucontext->mcontext.rsp;
+    infoMask = ucontext->sigmask[0];
+    infoLength = ucontext->mcontext.len;
+    infoFpFormat = ucontext->mcontext.fpformat;
+    infoFpOwned = ucontext->mcontext.ownedfp;
+    infoCodeSelector = ucontext->mcontext.cs;
+}
+volatile std::sig_atomic_t contextSignal = 30;
+[[gnu::noinline]] int APS5_VABI RaiseAtCallSite(int signal) {
+    raise_nid_postfix(signal);
+    return signal;
+}
+[[gnu::noinline]] int APS5_VABI UnblockAtCallSite(const GuestSignalSet* set) {
+    sigprocmask_nid_postfix(2, set, nullptr);
+    return set != nullptr;
+}
+Pthread contextTarget = nullptr;
 struct SuspendWait {
     const GuestSignalSet* mask = nullptr;
     int result = 0;
@@ -95,6 +129,10 @@ void APS5_VABI MaskCallback(int value) {
 
 }
 static void Require(bool value) { if (!value) std::abort(); }
+void* APS5_VABI NotifyContext(void*) {
+    Require(pthread_kill_nid_postfix(contextTarget, 30) == 0);
+    return nullptr;
+}
 static void CheckSignalPointerFaults() {
     constexpr std::size_t page = 0x4000;
     void* memory = nullptr;
@@ -288,15 +326,40 @@ int main() {
         Require(sigaction_nid_postfix(recorded, &defaults, nullptr) == 0);
     }
     Require(sigaction_nid_postfix(6, &crash, nullptr) == 0);
-    bool rejected = false;
-    try {
-        raise_nid_postfix(6);
-
-    } catch (const std::runtime_error&) {
-        rejected = true;
-    }
-    Require(rejected);
+    infoCalls = 0;
+    Require(raise_nid_postfix(6) == 0 && infoCalls == 1 && infoSigno == 6);
     Require(sigaction_nid_postfix(6, &defaults, &current) == 0 && current.handler == infoCallback && current.flags == 0x50);
+
+    const GuestSigaction infoAction{infoCallback, 0x40, {}};
+    Require(sigaction_nid_postfix(30, &infoAction, nullptr) == 0);
+    GuestSignalSet contextPrevious{};
+    const GuestSignalSet otherBlocked{{1u << 30, 0, 0, 0}};
+    Require(sigprocmask_nid_postfix(1, &otherBlocked, &contextPrevious) == 0);
+    const auto raiseSite = reinterpret_cast<std::uintptr_t>(&RaiseAtCallSite);
+    const auto unblockSite = reinterpret_cast<std::uintptr_t>(&UnblockAtCallSite);
+    infoCalls = 0;
+    Require(RaiseAtCallSite(contextSignal) == contextSignal);
+    Require(infoCalls == 1 && infoSigno == 30 && infoRecordSigno == 30);
+    Require(infoReturn >= raiseSite && infoReturn < raiseSite + 0x40);
+    Require(infoStack != 0);
+    Require((infoCodeSelector & 3) == 3);
+    Require(infoLength == sizeof(UserMcontext) && infoFpFormat == 0x10002 && infoFpOwned == 0x20001);
+    Require((infoMask & (1u << 30)) != 0 && (infoMask & (1u << 29)) == 0);
+    const GuestSignalSet ownBlocked{{1u << 29, 0, 0, 0}};
+    Require(sigprocmask_nid_postfix(1, &ownBlocked, nullptr) == 0);
+    infoCalls = 0;
+    contextTarget = scePthreadSelf();
+    Pthread notifier = nullptr;
+    Require(scePthreadCreate(&notifier, nullptr, NotifyContext, nullptr, nullptr) == 0);
+    Require(scePthreadJoin(notifier, nullptr) == 0);
+    Require(infoCalls == 0);
+    Require(UnblockAtCallSite(&ownBlocked));
+    Require(infoCalls == 1 && infoSigno == 30 && infoRecordSigno == 30);
+    Require(infoReturn >= unblockSite && infoReturn < unblockSite + 0x40);
+    Require(infoStack != 0);
+    Require((infoMask & (1u << 30)) != 0 && (infoMask & (1u << 29)) == 0);
+    Require(sigprocmask_nid_postfix(3, &contextPrevious, nullptr) == 0);
+    Require(sigaction_nid_postfix(30, &defaults, nullptr) == 0);
 
     *__error_nid_postfix() = 0;
     Require(sigaction_nid_postfix(0, nullptr, &current) == -1 && *__error_nid_postfix() == 22);

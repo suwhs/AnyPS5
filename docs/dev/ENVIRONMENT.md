@@ -23,6 +23,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_SPLIT_STATE_BYTES` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp` | a sixth of the largest device-local heap, at least 256 MiB | bytes of saved lane state a split table call slice may use; a direct dispatch runs in as few slices as fit in it and in `maxStorageBufferRange`, waiting for the GPU after each part that reads the lanes' targets back in each slice |
 | `APS5_SPLIT_STATE_LANES` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp` | 2097152 | lanes of each slice of an indirect split table call dispatch, whose workgroup count is only known on the GPU; fewer lanes mean more waits for the GPU (4096 made a PPSA01317 dispatch take 7.4 s instead of 450 ms) |
 | `APS5_SPLIT_TABLE_CALLS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderRegistry.cpp` |  | splits a compute shader whose table call cannot be linked into one part before the call, one part per callee and one after it |
+| `APS5_TRACE_GUEST_SIGNAL` | presence | `core/libs/prx/libkernel/System/src/Signals.cpp` |  | prints a line for each signal delivered to an `SA_SIGINFO` handler, with the signal number and the `si_code` the call site knows |
 | `APS5_USBD_DEVICE` | string | `core/libs/tests/GuestUsbd.cpp` |  | selects the USB device a test drives, as vendor:product in hex |
 
 ### core/relinker

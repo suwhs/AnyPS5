@@ -8,6 +8,7 @@
 #include "prx/libkernel/Pthread/Posix/Common.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
 #include "prx/libkernel/System/include/TimerSignals.hpp"
+#include "prx/libkernel/System/include/UserContext.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
@@ -20,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <immintrin.h>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -97,7 +99,7 @@ static_assert(sizeof(GuestSiginfo) == 80 && offsetof(GuestSiginfo, code) == 8 &&
     offsetof(GuestSiginfo, uid) == 16 && offsetof(GuestSiginfo, address) == 24 && offsetof(GuestSiginfo, value) == 32 &&
     offsetof(GuestSiginfo, timerid) == 40 && offsetof(GuestSiginfo, overrun) == 44);
 
-using GuestSiginfoHandler = void (APS5_VABI *)(int, GuestSiginfo *, void *);
+using GuestSiginfoHandler = void (APS5_VABI *)(int, GuestSiginfo *, UserUcontext *);
 
 static_assert(sizeof(KernelTimespec) == 16 && offsetof(KernelTimespec, tv_nsec) == 8);
 bool IgnoredByDefault(int guest) {
@@ -297,6 +299,69 @@ void ResetToDefault(int guest) {
         if (native == SIGSEGV) GuestFaultCopyReinstall_nid_no_patch();
     }
 }
+struct GuestCallFrame {
+    std::uint64_t rip;
+    std::uint64_t rsp;
+    std::uint64_t rbp;
+    bool captured;
+};
+GuestCallFrame& CurrentGuestCall() {
+    thread_local GuestCallFrame frame{};
+    return frame;
+}
+struct GuestCallScope {
+    bool owner = false;
+    [[gnu::always_inline]] inline GuestCallScope() {
+        auto& frame = CurrentGuestCall();
+        if (frame.captured) return;
+        const auto address = reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
+        frame.rip = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+        frame.rsp = address + 16;
+        frame.rbp = *reinterpret_cast<const std::uint64_t*>(address);
+        frame.captured = true;
+        owner = true;
+    }
+    ~GuestCallScope() {
+        if (owner) CurrentGuestCall().captured = false;
+    }
+    GuestCallScope(const GuestCallScope&) = delete;
+    GuestCallScope& operator=(const GuestCallScope&) = delete;
+};
+constexpr std::uint64_t GuestFpFormatXmm = 0x10002;
+constexpr std::uint64_t GuestFpOwnedFpu = 0x20001;
+std::uint64_t CurrentFlags() {
+    std::uint64_t flags = 0;
+    __asm__ volatile("pushfq\n\tpopq %0" : "=r"(flags));
+    return flags;
+}
+std::uint16_t CurrentCodeSelector() {
+    std::uint16_t selector = 0;
+    __asm__ volatile("movw %%cs, %0" : "=r"(selector));
+    return selector;
+}
+std::uint16_t CurrentStackSelector() {
+    std::uint16_t selector = 0;
+    __asm__ volatile("movw %%ss, %0" : "=r"(selector));
+    return selector;
+}
+void CaptureGuestUcontext(UserUcontext& context) {
+    const auto& frame = CurrentGuestCall();
+    auto& machine = context.mcontext;
+    if (frame.captured) {
+        machine.rip = frame.rip;
+        machine.rsp = frame.rsp;
+        machine.rbp = frame.rbp;
+    }
+    machine.rflags = CurrentFlags();
+    machine.cs = CurrentCodeSelector();
+    machine.ss = CurrentStackSelector();
+    machine.len = sizeof(UserMcontext);
+    machine.fpformat = GuestFpFormatXmm;
+    machine.ownedfp = GuestFpOwnedFpu;
+    _fxsave64(machine.fpstate);
+    auto& self = CurrentSignals();
+    for (int word = 0; word < 4; ++word) context.sigmask[word] = BlockedWord(self, word);
+}
 void RunHandler(int guest, GuestHandler handler, const GuestSiginfo* info = nullptr) {
     auto& self = CurrentSignals();
     const int flags = handlerFlags[guest].load();
@@ -307,6 +372,8 @@ void RunHandler(int guest, GuestHandler handler, const GuestSiginfo* info = null
     if ((flags & SaResethand) != 0) ResetToDefault(guest);
     std::uint32_t before[4];
     for (int word = 0; word < 4; ++word) before[word] = self.blocked[word].load() & mask[word];
+    UserUcontext context{};
+    if (info != nullptr) CaptureGuestUcontext(context);
     std::uint32_t epochs[MaxSignal + 1]{};
     std::uint32_t releases[MaxSignal + 1]{};
     for (int held = 1; held <= MaxSignal; ++held) {
@@ -314,8 +381,13 @@ void RunHandler(int guest, GuestHandler handler, const GuestSiginfo* info = null
         releases[held] = holdReleases[held];
         epochs[held] = static_cast<std::uint32_t>(self.holds[held].fetch_add(1) >> 32);
     }
-    if (info != nullptr) reinterpret_cast<GuestSiginfoHandler>(handler)(guest, const_cast<GuestSiginfo*>(info), nullptr);
-    else handler(guest);
+    if (info != nullptr) {
+        auto& resume = CurrentGuestCall();
+        const bool captured = resume.captured;
+        resume.captured = false;
+        reinterpret_cast<GuestSiginfoHandler>(handler)(guest, const_cast<GuestSiginfo*>(info), &context);
+        resume.captured = captured;
+    } else handler(guest);
     std::uint32_t replaced[4]{};
     for (int held = 1; held <= MaxSignal; ++held) {
         if ((mask[SignalWord(held)] & SignalBit(held)) == 0) continue;
@@ -419,6 +491,7 @@ bool DeliverPendingSignal(int guest) {
     if (action.handler == 1) return false;
     if (action.handler > 1 && !Delivered(action)) {
         const GuestSiginfo info = LocalSiginfo(guest, GuestSiUser);
+        if (std::getenv("APS5_TRACE_GUEST_SIGNAL") != nullptr) std::fprintf(stderr, "[guest-signal] pending %d delivered to an SA_SIGINFO handler (code 0x%x)\n", guest, info.code);
         RunHandler(guest, reinterpret_cast<GuestHandler>(action.handler), &info);
         return true;
     }
@@ -839,6 +912,7 @@ int ChangeBlockedMask(int how, const GuestSignalSet* set, GuestSignalSet* previo
 }
 
 extern "C" int APS5_VABI SetSignalMaskCatching_nid_no_patch(const GuestSignalSet* set, GuestSignalSet* previousSet) {
+    const GuestCallScope guestCallScope;
     bool caught = false;
     ChangeBlockedMask(GuestSigsetmask, set, previousSet, true, &caught);
     return caught ? 1 : 0;
@@ -886,6 +960,7 @@ static int RaiseWithCode(int guest, std::int32_t code) {
     const GuestSigaction action = Disposition(guest);
     if (action.handler > 1 && !Delivered(action)) {
         const GuestSiginfo info = LocalSiginfo(guest, code);
+        if (std::getenv("APS5_TRACE_GUEST_SIGNAL") != nullptr) std::fprintf(stderr, "[guest-signal] raise %d delivered to an SA_SIGINFO handler (code 0x%x)\n", guest, code);
         RunHandler(guest, reinterpret_cast<GuestHandler>(action.handler), &info);
         return 0;
     }
@@ -909,9 +984,11 @@ static int RaiseWithCode(int guest, std::int32_t code) {
     return 0;
 }
 int APS5_VABI raise_nid_postfix(int guest) {
+    const GuestCallScope guestCallScope;
     return RaiseWithCode(guest, GuestSiLwp);
 }
 int APS5_VABI kill_nid_postfix(int pid, int guest) {
+    const GuestCallScope guestCallScope;
     if (guest < 0 || guest > MaxSignal) { *__error_nid_postfix() = 22; return -1; }
     const int self = getpid_nid_postfix();
     if (pid != self && pid != 0 && pid != -self) { *__error_nid_postfix() = 3; return -1; }
@@ -919,10 +996,12 @@ int APS5_VABI kill_nid_postfix(int pid, int guest) {
     return RaiseWithCode(guest, GuestSiUser);
 }
 int APS5_VABI killpg_nid_postfix(int pgrp, int guest) {
+    const GuestCallScope guestCallScope;
     if (pgrp == 1) { *__error_nid_postfix() = 3; return -1; }
     return kill_nid_postfix(static_cast<int>(0u - static_cast<unsigned>(pgrp)), guest);
 }
 int APS5_VABI pthread_kill_nid_postfix(Pthread thread, int guest) {
+    const GuestCallScope guestCallScope;
     if (guest < 0 || guest > MaxSignal) return PosixThread::GUEST_EINVAL;
     if (thread == nullptr) return PosixThread::GUEST_EINVAL;
     if (thread == scePthreadSelf()) return guest == 0 || raise_nid_postfix(guest) == 0 ? 0 : *__error_nid_postfix();
@@ -949,6 +1028,7 @@ int APS5_VABI sigaltstack_nid_postfix(const GuestStack* stack, GuestStack* previ
     return 0;
 }
 int APS5_VABI _sigprocmask_nid_postfix(int how, const GuestSignalSet* set, GuestSignalSet* previousSet) {
+    const GuestCallScope guestCallScope;
     GuestSignalSet requested{}, old{};
     if (set != nullptr) {
         if (!GuestCopyIn_nid_no_patch(&requested, set, sizeof(requested))) { *__error_nid_postfix() = 14; return -1; }
@@ -958,11 +1038,13 @@ int APS5_VABI _sigprocmask_nid_postfix(int how, const GuestSignalSet* set, Guest
 }
 
 int APS5_VABI sigprocmask_nid_postfix(int how, const void* set, void* previousSet) {
+    const GuestCallScope guestCallScope;
     return _sigprocmask_nid_postfix(how, static_cast<const GuestSignalSet*>(set),
                                     static_cast<GuestSignalSet*>(previousSet));
 }
 
 int APS5_VABI pthread_sigmask_nid_postfix(int how, const GuestSignalSet* set, GuestSignalSet* previousSet) {
+    const GuestCallScope guestCallScope;
     const int saved = *__error_nid_postfix();
     const int error = _sigprocmask_nid_postfix(how, set, previousSet) == 0 ? 0 : *__error_nid_postfix();
     *__error_nid_postfix() = saved;
@@ -1036,12 +1118,14 @@ int APS5_VABI sigwait_nid_postfix(const GuestSignalSet* set, int* received) {
 }
 
 int APS5_VABI pause_nid_postfix(void) {
+    const GuestCallScope guestCallScope;
     WaitForDeliverableSignal();
     *__error_nid_postfix() = GuestEintr;
     return -1;
 }
 
 int APS5_VABI sigsuspend_nid_postfix(const GuestSignalSet* set) {
+    const GuestCallScope guestCallScope;
     GuestSignalSet requested{};
     if (set == nullptr || !GuestCopyIn_nid_no_patch(&requested, set, sizeof(requested))) {
         *__error_nid_postfix() = 14;
@@ -1063,6 +1147,7 @@ int APS5_VABI sigsuspend_nid_postfix(const GuestSignalSet* set) {
 }
 
 int APS5_VABI _sigsuspend_nid_postfix(const GuestSignalSet* set) {
+    const GuestCallScope guestCallScope;
     return sigsuspend_nid_postfix(set);
 }
 

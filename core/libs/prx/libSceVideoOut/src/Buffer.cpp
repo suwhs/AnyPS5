@@ -4,10 +4,18 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <atomic>
+#include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceVideoOut/include/VideoOutDriver.hpp"
+#include "prx/libSceVideoOut/include/Telemetry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 
 AgcDriver::DisplayBuffer DescribeVideoOutBuffer(const VideoOutBuffer& buffer, const BufferAttributeGroup& group) {
@@ -382,6 +390,15 @@ int APS5_VABI sceVideoOutSubmitFlip(int handle, int index, int flipMode, int64_t
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_INDEX");
     }
     lock.unlock();
+    if (VideoOutTelemetry::Instance() != nullptr) {
+#ifdef _WIN32
+        const unsigned long submitter = GetCurrentThreadId();
+#else
+        const unsigned long submitter = static_cast<unsigned long>(gettid());
+#endif
+        static std::atomic<unsigned long> lastSubmitter{0};
+        if (lastSubmitter.exchange(submitter) != submitter) std::fprintf(stderr, "[flip] submit from thread %lu\n", submitter);
+    }
     return VideoOutDriver::Get().SubmitFlip(handle, index, flipMode, flipArg);
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();

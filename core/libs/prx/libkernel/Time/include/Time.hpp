@@ -32,7 +32,10 @@ extern "C" {
     // Debug aid: APS5_TRACE_WAITS=1 aggregates blocking waits (event flags, semaphores, condition
     // variables, event queues) per guest call site and prints the sites that wait longest every 3 s,
     // with their timeout rate; a site that times out once per frame is a lost wake-up.
-    void KernelTraceWait_nid_postfix(const char* kind, const void* caller, std::uint64_t waitedNanos, bool timedOut);
+    void KernelTraceWait_nid_postfix(const char* kind, const void* caller, std::uint64_t waitedNanos, bool timedOut, const void* object = nullptr);
+    void KernelTraceCondWaitBegin_nid_postfix(const void* condition);
+    void KernelTraceCondNotify_nid_postfix(const void* condition, bool broadcast);
+    void KernelTraceYield_nid_postfix(const void* caller);
 
 }
 

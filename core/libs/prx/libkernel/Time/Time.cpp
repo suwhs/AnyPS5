@@ -367,8 +367,120 @@ static void TraceSleep(const void* caller, std::uint64_t microseconds) {
     std::fprintf(stderr, "\n");
 }
 
-void KernelTraceWait_nid_postfix(const char* kind, const void* caller, std::uint64_t waitedNanos, bool timedOut) {
+namespace {
+
+struct YieldTally {
+    std::uint64_t count = 0;
+    std::string caller;
+};
+
+std::mutex& YieldMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<unsigned long, YieldTally>& YieldTallies() {
+    static std::unordered_map<unsigned long, YieldTally> tallies;
+    return tallies;
+}
+
+}  // namespace
+
+namespace {
+
+std::mutex& SlowObjectMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<const void*, std::uint64_t>& SlowObjects() {
+    static std::unordered_map<const void*, std::uint64_t> objects;
+    return objects;
+}
+
+std::mutex& CondWaitsMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<const void*, std::uint64_t>& CondWaits() {
+    static std::unordered_map<const void*, std::uint64_t> waits;
+    return waits;
+}
+
+}  // namespace
+
+void KernelTraceCondWaitBegin_nid_postfix(const void* condition) {
+    if (!KernelTraceWaitEnabled() || condition == nullptr) return;
+    std::lock_guard lock(CondWaitsMutex());
+    CondWaits()[condition] = GetMonotonicNanos();
+}
+
+void KernelTraceCondNotify_nid_postfix(const void* condition, bool broadcast) {
+    if (!KernelTraceWaitEnabled() || condition == nullptr) return;
+    static const bool enabled = std::getenv("APS5_TRACE_CONDS") != nullptr;
+    if (!enabled) return;
+    static std::mutex mutex;
+    static std::uint64_t started = 0;
+    std::lock_guard lock(mutex);
+    const std::uint64_t now = GetMonotonicNanos();
+    if (started == 0) started = now;
+    const char* when = nullptr;
+    {
+        std::lock_guard lock(CondWaitsMutex());
+        auto& waits = CondWaits();
+        const auto found = waits.find(condition);
+        if (found != waits.end() && now - found->second >= 200000000ULL) {
+            when = "during";
+            waits.erase(found);
+        }
+    }
+    if (when == nullptr) {
+        std::lock_guard< std::mutex> recentLock(SlowObjectMutex());
+        auto& objects = SlowObjects();
+        const auto found = objects.find(condition);
+        if (found == objects.end()) return;
+        when = now - found->second > 3000000000ULL ? nullptr : "after";
+        if (when == nullptr) return;
+    }
+    std::fprintf(stderr, "[cond-notify] t=%.1fs %s %s obj %p tid %lu\n",
+        static_cast<double>(now - started) / 1e9, when, broadcast ? "broadcast" : "signal", condition, CurrentThreadIdForTrace());
+}
+
+void KernelTraceYield_nid_postfix(const void* caller) {
     if (!KernelTraceWaitEnabled()) return;
+    thread_local std::uint64_t pending = 0;
+    thread_local const void* pendingCaller = nullptr;
+    pendingCaller = caller;
+    if (++pending < 256) return;
+    const std::string site = DescribeCallSite(pendingCaller);
+    std::lock_guard lock(YieldMutex());
+    auto& tally = YieldTallies()[CurrentThreadIdForTrace()];
+    tally.count += pending;
+    tally.caller = site;
+    pending = 0;
+}
+
+void KernelTraceWait_nid_postfix(const char* kind, const void* caller, std::uint64_t waitedNanos, bool timedOut, const void* object) {
+    if (!KernelTraceWaitEnabled()) return;
+    if (waitedNanos >= 200000000ULL) {
+        static std::mutex longMutex;
+        static std::uint64_t started = 0;
+        std::lock_guard lock(longMutex);
+        const std::uint64_t now = GetMonotonicNanos();
+        if (started == 0) started = now;
+        std::fprintf(stderr, "[wait-long] t=%.1fs %s %.1f ms (timed out %d) tid %lu obj %p %s\n",
+            static_cast<double>(now - started) / 1e9, kind, static_cast<double>(waitedNanos) / 1e6,
+            timedOut ? 1 : 0, CurrentThreadIdForTrace(), object, DescribeCallSite(caller).c_str());
+        if (object != nullptr) {
+            {
+                std::lock_guard< std::mutex> recentLock(SlowObjectMutex());
+                SlowObjects()[object] = now;
+            }
+            std::lock_guard lock(CondWaitsMutex());
+            CondWaits().erase(object);
+        }
+    }
     struct Site { std::uint64_t calls = 0; std::uint64_t timeouts = 0; std::uint64_t nanos = 0; std::uint64_t longest = 0; unsigned long lastThread = 0; };
     static std::mutex mutex;
     static std::unordered_map<std::string, Site> sites;
@@ -390,6 +502,19 @@ void KernelTraceWait_nid_postfix(const char* kind, const void* caller, std::uint
     if (lastReport == 0) lastReport = now;
     if (now - lastReport < 3000000000ULL) return;
     lastReport = now;
+    {
+        std::vector<std::pair<unsigned long, YieldTally>> yields(YieldTallies().begin(), YieldTallies().end());
+        std::erase_if(yields, [](const auto& item) { return item.second.count == 0; });
+        if (!yields.empty()) {
+            std::sort(yields.begin(), yields.end(), [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+            std::fprintf(stderr, "[yields]");
+            for (std::size_t i = 0; i < yields.size() && i < 3; ++i) {
+                std::fprintf(stderr, " | tid %lu x%llu %s", yields[i].first, static_cast<unsigned long long>(yields[i].second.count), yields[i].second.caller.c_str());
+            }
+            std::fprintf(stderr, "\n");
+            for (auto& item : yields) item.second.count = 0;
+        }
+    }
     std::vector<std::pair<std::string, Site>> hot(sites.begin(), sites.end());
     std::erase_if(hot, [](const auto& item) { return item.second.calls == 0; });
     std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second.nanos > b.second.nanos; });

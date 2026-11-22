@@ -6,6 +6,7 @@
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
+#include "prx/libkernel/Time/include/Time.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -254,8 +255,10 @@ int APS5_VABI scePthreadMutexDestroy(PthreadMutex* mutex) {
 }
 
 int APS5_VABI scePthreadMutexLock(PthreadMutex* mutex) {
+    static const bool trace = KernelTraceWaitEnabled();
+    const std::uint64_t start = trace ? TimedWait::NowNanos() : 0;
     auto* current = resolveMutex(mutex, true);
-    return acquireMutex(current, [current](auto& native) {
+    const int result = acquireMutex(current, [current](auto& native) {
 #ifdef _WIN32
         return TimedWait::ParkAcquire(current, [&] { return native.try_lock(); }, nullptr);
 #else
@@ -264,6 +267,8 @@ int APS5_VABI scePthreadMutexLock(PthreadMutex* mutex) {
         return true;
 #endif
     }, 0, false);
+    if (trace) KernelTraceWait_nid_postfix("mutex", __builtin_return_address(0), TimedWait::NowNanos() - start, false);
+    return result;
 }
 
 int APS5_VABI scePthreadMutexUnlock(PthreadMutex* mutex) {

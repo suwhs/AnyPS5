@@ -135,11 +135,12 @@ int waitUntil(std::shared_ptr<TimedWait::Condition> condition, PthreadMutex* mut
     if (const int error = mutexOwnership(mutex, &m))
         return error;
     bool timedOut = false;
+    KernelTraceCondWaitBegin_nid_postfix(condition.get());
     const auto waitStart = std::chrono::steady_clock::now();
     struct Trace {
-        const void* caller; const bool& timedOut; std::chrono::steady_clock::time_point start;
-        ~Trace() { KernelTraceWait_nid_postfix("cond", caller, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()), timedOut); }
-    } trace{caller, timedOut, waitStart};
+        const void* caller; const void* object; const bool& timedOut; std::chrono::steady_clock::time_point start;
+        ~Trace() { KernelTraceWait_nid_postfix("cond", caller, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()), timedOut, object); }
+    } trace{caller, condition.get(), timedOut, waitStart};
     if (m->_type == MutexType::Recursive) {
         WakingLock<std::recursive_timed_mutex> waking{m, m->_rmtx};
         std::unique_lock lock(waking, std::adopt_lock);
@@ -278,6 +279,7 @@ int APS5_VABI scePthreadCondSignal(PthreadCond* cond) {
     const auto resolved = resolveCond(cond);
     if (!resolved)
         return SCE_KERNEL_ERROR_EINVAL;
+    KernelTraceCondNotify_nid_postfix(resolved.get(), false);
     resolved->NotifyOne();
     return 0;
 }
@@ -286,6 +288,7 @@ int APS5_VABI scePthreadCondBroadcast(PthreadCond* cond) {
     const auto resolved = resolveCond(cond);
     if (!resolved)
         return SCE_KERNEL_ERROR_EINVAL;
+    KernelTraceCondNotify_nid_postfix(resolved.get(), true);
     resolved->NotifyAll();
     return 0;
 }
@@ -298,6 +301,7 @@ int APS5_VABI scePthreadCondSignalto(PthreadCond* cond, Pthread thread) {
         return SCE_KERNEL_ERROR_ESRCH;
     if (!IsWaiting(resolved.get(), thread))
         return SCE_KERNEL_ERROR_EPERM;
+    KernelTraceCondNotify_nid_postfix(resolved.get(), true);
     resolved->NotifyAll();
     return 0;
 }

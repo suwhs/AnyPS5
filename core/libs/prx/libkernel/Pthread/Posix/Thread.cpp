@@ -502,6 +502,7 @@ int APS5_VABI pthread_getcpuclockid_nid_postfix(Pthread thread, int* clockId) {
 }
 
 int APS5_VABI sched_yield_nid_postfix(void) {
+    KernelTraceYield_nid_postfix(__builtin_return_address(0));
     scePthreadYield();
 
     return 0;

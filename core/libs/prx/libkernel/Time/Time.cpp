@@ -427,13 +427,84 @@ static void SleepUntilComplete(std::uint64_t nanos) {
     ThreadCancel::Check();
 }
 
+namespace {
+
+struct SleepSite {
+    std::uint64_t calls = 0;
+    std::uint64_t requestedNanos = 0;
+    std::uint64_t longestRequested = 0;
+    std::uint64_t waitedNanos = 0;
+    std::uint64_t longestWaited = 0;
+    unsigned long lastThread = 0;
+};
+
+}  // namespace
+
+static void TraceSleepSite(const void* caller, std::uint64_t requestedNanos, std::uint64_t waitedNanos) {
+    static const bool enabled = std::getenv("APS5_TRACE_SLEEPS") != nullptr;
+    if (!enabled) return;
+    if (waitedNanos >= 200000000ULL || requestedNanos >= 200000000ULL) {
+        static std::mutex longMutex;
+        static std::uint64_t started = 0;
+        std::lock_guard lock(longMutex);
+        const std::uint64_t now = GetMonotonicNanos();
+        if (started == 0) started = now;
+        std::fprintf(stderr, "[sleep-long] t=%.1fs asked %.1f ms waited %.1f ms tid %lu %s\n",
+            static_cast<double>(now - started) / 1e9, static_cast<double>(requestedNanos) / 1e6,
+            static_cast<double>(waitedNanos) / 1e6, CurrentThreadIdForTrace(), DescribeCallSite(caller).c_str());
+    }
+    static std::mutex mutex;
+    static std::unordered_map<std::string, SleepSite> sites;
+    static std::uint64_t lastReport = 0;
+    std::lock_guard lock(mutex);
+    auto& site = sites[DescribeCallSite(caller)];
+    ++site.calls;
+    site.requestedNanos += requestedNanos;
+    site.longestRequested = std::max(site.longestRequested, requestedNanos);
+    site.waitedNanos += waitedNanos;
+    site.longestWaited = std::max(site.longestWaited, waitedNanos);
+    site.lastThread = CurrentThreadIdForTrace();
+    const std::uint64_t now = GetMonotonicNanos();
+    if (lastReport == 0) lastReport = now;
+    if (now - lastReport < 3000000000ULL) return;
+    lastReport = now;
+    std::vector<std::pair<std::string, SleepSite>> hot(sites.begin(), sites.end());
+    std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second.waitedNanos > b.second.waitedNanos; });
+    std::fprintf(stderr, "[sleeps]");
+    for (std::size_t i = 0; i < hot.size() && i < 8; ++i) {
+        const auto& s = hot[i].second;
+        std::fprintf(stderr, " | %s x%llu asked %.1fs (avg %.1f ms, max %.0f ms) waited %.1fs (avg %.1f ms, max %.1f ms, tid %lu)",
+            hot[i].first.c_str(), static_cast<unsigned long long>(s.calls),
+            s.requestedNanos / 1e9, s.requestedNanos / 1e6 / static_cast<double>(s.calls), s.longestRequested / 1e6,
+            s.waitedNanos / 1e9, s.waitedNanos / 1e6 / static_cast<double>(s.calls), s.longestWaited / 1e6, s.lastThread);
+    }
+    std::fprintf(stderr, "\n");
+}
+
+static bool SleepTraceEnabled() {
+    static const bool enabled = std::getenv("APS5_TRACE_SLEEPS") != nullptr;
+    return enabled;
+}
+
+static void TracedSleep(const void* caller, std::uint64_t nanos, bool cancellable) {
+    if (!SleepTraceEnabled()) {
+        if (cancellable) CancellableSleep(nanos);
+        else SleepUntilComplete(nanos);
+        return;
+    }
+    const std::uint64_t start = TimedWait::NowNanos();
+    if (cancellable) CancellableSleep(nanos);
+    else SleepUntilComplete(nanos);
+    TraceSleepSite(caller, nanos, TimedWait::NowNanos() - start);
+}
+
 int APS5_VABI sceKernelUsleep_nid_postfix(KernelUseconds microseconds) {
     TraceSleep(__builtin_return_address(0), microseconds);
-    SleepUntilComplete(static_cast<std::uint64_t>(microseconds) * 1000ULL);
+    TracedSleep(__builtin_return_address(0), static_cast<std::uint64_t>(microseconds) * 1000ULL, false);
     return 0;
 }
 
-static int SleepForRequest(const KernelTimespec* rqtp, bool cancellable) {
+static int SleepForRequest(const KernelTimespec* rqtp, bool cancellable, const void* caller) {
     constexpr int guestFault = 14;
     constexpr int guestInvalid = 22;
     KernelTimespec request{};
@@ -448,19 +519,18 @@ static int SleepForRequest(const KernelTimespec* rqtp, bool cancellable) {
         const auto nanos = static_cast<std::uint64_t>(
                                std::min(static_cast<std::int64_t>(rqtp->tv_sec), longestSleepSeconds)) *
                            1000000000ULL + static_cast<std::uint64_t>(rqtp->tv_nsec);
-        if (cancellable) CancellableSleep(nanos);
-        else SleepUntilComplete(nanos);
+        TracedSleep(caller, nanos, cancellable);
     }
     return 0;
 }
 
 int APS5_VABI sceKernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rmtp) {
-    const int error = SleepForRequest(rqtp, false);
+    const int error = SleepForRequest(rqtp, false, __builtin_return_address(0));
     return error == 0 ? 0 : SceKernelError(error);
 }
 
 int APS5_VABI nanosleep_nid_postfix(const KernelTimespec* rqtp, KernelTimespec* rmtp) {
-    const int error = SleepForRequest(rqtp, true);
+    const int error = SleepForRequest(rqtp, true, __builtin_return_address(0));
     if (error == 0) return 0;
     *__error_nid_postfix() = error;
     return -1;
@@ -471,7 +541,7 @@ int APS5_VABI _nanosleep_nid_postfix(const KernelTimespec* rqtp, KernelTimespec*
 }
 
 int APS5_VABI usleep_nid_postfix(KernelUseconds microseconds) {
-    CancellableSleep(static_cast<std::uint64_t>(microseconds) * 1000ULL);
+    TracedSleep(__builtin_return_address(0), static_cast<std::uint64_t>(microseconds) * 1000ULL, true);
     return 0;
 }
 
@@ -955,7 +1025,7 @@ std::int64_t APS5_VABI sceKernelGetCpuFrequency(void) {
 }
 
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {
-    SleepUntilComplete(static_cast<std::uint64_t>(seconds) * 1000000000ULL);
+    TracedSleep(__builtin_return_address(0), static_cast<std::uint64_t>(seconds) * 1000000000ULL, false);
     return 0;
 }
 

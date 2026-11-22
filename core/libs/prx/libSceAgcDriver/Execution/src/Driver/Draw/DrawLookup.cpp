@@ -175,7 +175,17 @@ void Driver::lookupDraw(const Submission& submission, const std::shared_ptr<Vulk
                             for (const auto& [position, value] : liveData) hit.words[position] = value;
                             regions.clear();
                             appendEntryRegions(*variant, regions, &hit.words);
-                            hit.compiled = patchDataWords(*variant, hit.words);
+                            static thread_local const DispatchVariant* memoVariant = nullptr;
+                            static thread_local std::vector<std::uint32_t> memoWords;
+                            static thread_local std::shared_ptr<const ShaderRecompiler::RecompileResult> memoCompiled;
+                            if (memoVariant == variant.get() && memoWords == hit.words && memoCompiled != nullptr) {
+                                hit.compiled = std::move(memoCompiled);
+                            } else {
+                                hit.compiled = patchDataWords(*variant, hit.words);
+                                memoWords = hit.words;
+                                memoCompiled = hit.compiled;
+                                memoVariant = variant.get();
+                            }
                             ++dataStages;
                             dataWords += liveData.size();
                         }

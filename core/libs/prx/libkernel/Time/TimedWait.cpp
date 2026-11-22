@@ -756,10 +756,13 @@ bool SleepNanosUnlessChanged(std::uint64_t nanos, const std::atomic<std::uint64_
 
 void WakeChangeSleepers() {
     if (ChangeSleeperCount().load(std::memory_order_seq_cst) == 0) return;
-    std::lock_guard lock(ChangeSleepersMutex());
 #ifdef _WIN32
+    std::lock_guard lock(ChangeSleepersMutex());
     for (const HANDLE sleeper : ChangeSleepers()) SetEvent(sleeper);
 #else
+    {
+        std::lock_guard lock(ChangeSleepersMutex());
+    }
     ChangeCondition().notify_all();
 #endif
 }

@@ -1721,6 +1721,11 @@ bool importStaysWatched(const Context& context, HostImports& state, const Import
 #endif
 }
 
+bool importKeepsReregistered() {
+    static const bool enabled = std::getenv("APS5_IMPORT_KEEP_REREGISTERED") != nullptr;
+    return enabled;
+}
+
 bool continuesRun(const GuestAllocations::Range& before, const GuestAllocations::Range& after) {
     return before.address + before.bytes == after.address && before.HostReadable() && after.HostReadable() && before.readable == after.readable && before.writable == after.writable && before.gpu == after.gpu && before.HostWritable() == after.HostWritable();
 }
@@ -1922,11 +1927,19 @@ bool wouldRetireImport(const HostImports& state, const ImportRun& run) {
 
 bool sameRange(const ImportFailure& entry, const GuestAllocations::Lease& lease, std::uint64_t budget = 0) {
     const auto current = entry.ranges.size() == 1 ? leasedRangeOwner(lease, entry.base, entry.base + entry.bytes) : nullptr;
-    if (current != nullptr && entry.bytes < current->bytes) return !entry.ranges.front().owner_before(current) && !current.owner_before(entry.ranges.front());
+    if (current != nullptr && entry.bytes < current->bytes) return importKeepsReregistered() ? current->bytes == entry.bytes : (!entry.ranges.front().owner_before(current) && !current.owner_before(entry.ranges.front()));
     return sameRun(entry, lease, importRunBounds(lease, entry.base, std::numeric_limits<std::uint64_t>::max(), budget));
 }
 
 bool sameRange(const HostImport& entry, const GuestAllocations::Lease& lease) {
+    if (importKeepsReregistered()) {
+        const bool holesAllowed = entry.ranges.size() > 1;
+        return std::all_of(entry.ranges.begin(), entry.ranges.end(), [&](const auto& range) {
+            const auto current = leasedRangeOwner(lease, range->address);
+            if (current == nullptr) return holesAllowed;
+            return current->bytes == range->bytes && current->readable == range->readable && current->writable == range->writable && current->gpu == range->gpu && current->gpuWritable == range->gpuWritable;
+        });
+    }
     return std::all_of(entry.ranges.begin(), entry.ranges.end(), [&](const auto& range) {
         const auto current = leasedRangeOwner(lease, range->address);
         return current != nullptr && !range.owner_before(current) && !current.owner_before(range);
@@ -2309,7 +2322,8 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
     if (fresh && end != 0) {
         if (const auto* current = findImport(state, address, end)) return current;
     } else if (!fresh) {
-        if (const auto* current = peekImport(state, address, address + 1); current != nullptr && current->joined && sameRange(*current, lease)) {
+        const auto* current = end != 0 ? findImport(state, address, end) : peekImport(state, address, address + 1);
+        if (current != nullptr && (current->joined || (importKeepsReregistered() && end != 0)) && sameRange(*current, lease)) {
             current->lastUse = ++state.useCounter;
             return current;
         }

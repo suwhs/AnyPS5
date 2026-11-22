@@ -5091,6 +5091,11 @@ std::shared_ptr<ShaderResources> ResourceCache::Find(const Key& key) {
     return found->second->second;
 }
 
+bool ResourceCache::Holds(const Key& key) const {
+    std::lock_guard lock(mutex);
+    return index.find(key) != index.end();
+}
+
 void ResourceCache::noteEvicted(const Key& key) {
     if (fixedCapacity) return;
     const auto hash = KeyHash{}(key);

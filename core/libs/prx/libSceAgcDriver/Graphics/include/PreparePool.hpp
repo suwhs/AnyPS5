@@ -26,6 +26,7 @@ struct PreparedStageA {
 };
 
 std::size_t PrepareWorkers();
+std::size_t PrepareQueueDepth();
 bool PreparePoolEnabled();
 
 class PreparePool {

@@ -5214,9 +5214,9 @@ void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParamete
     if (traceDraws) APS5_LOG_CHARS_OUT("VulkanDevice::Draw complete");
 }
 
-std::shared_ptr<Graphics::PreparedStageA> VulkanDevice::PrepareDrawStageA(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+std::shared_ptr<Graphics::PreparedStageA> VulkanDevice::PrepareDrawStageA(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots, const std::vector<std::uint32_t>& contentKey) {
     if (!Graphics::PreparePoolEnabled()) return nullptr;
-    return Graphics::PrepareDrawStageA(graphicsContext(), graphics, draw, shaders, snapshots);
+    return Graphics::PrepareDrawStageA(graphicsContext(), graphics, draw, shaders, snapshots, contentKey);
 }
 
 bool VulkanDevice::DrawInputsInPlace() const {

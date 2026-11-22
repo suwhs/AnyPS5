@@ -27,6 +27,17 @@ std::size_t PrepareWorkers() {
     return workers;
 }
 
+std::size_t PrepareQueueDepth() {
+    static const std::size_t depth = [] {
+        constexpr std::size_t DefaultPrepareQueue = 32;
+        const char* text = std::getenv("APS5_PREPARE_QUEUE");
+        if (text == nullptr) return DefaultPrepareQueue;
+        const auto value = std::strtoull(text, nullptr, 10);
+        return value == 0 ? std::size_t{1} : static_cast<std::size_t>(std::min<unsigned long long>(value, 4096));
+    }();
+    return depth;
+}
+
 bool PreparePoolEnabled() {
     return PrepareWorkers() != 0;
 }

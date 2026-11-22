@@ -4989,8 +4989,9 @@ std::vector<std::uint32_t> DrawResourceContentKey(const Context& context, const 
     return DrawResourceKey(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, indexBytes, !trimKey);
 }
 
-std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
-    if (!PreparePoolEnabled() || PreparePool::Get().InFlight() >= PrepareWorkers()) return nullptr;
+std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, const std::vector<std::uint32_t>& contentKey) {
+    if (!PreparePoolEnabled() || PreparePool::Get().InFlight() >= PrepareQueueDepth()) return nullptr;
+    if (!contentKey.empty() && SharedResourceCache().Holds(contentKey)) return nullptr;
     auto slot = std::make_shared<PreparedStageA>();
     slot->staging = RecordDraws() && DumpTargetLimit() == 0 && drawStagingEnabled();
     const auto target = state.color;
@@ -5000,9 +5001,10 @@ std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const 
     const auto staging = slot->staging;
     auto captured = std::vector<GuestMemorySnapshot>(snapshots.begin(), snapshots.end());
     auto stageShaders = std::vector<CompiledShader>(shaders.begin(), shaders.end());
-    PreparePool::Get().Enqueue([slot, context, target, colors, indexAddress, indexBytes, staging, captured = std::move(captured), stageShaders = std::move(stageShaders)]() mutable {
+    auto key = contentKey;
+    PreparePool::Get().Enqueue([slot, context, target, colors, indexAddress, indexBytes, staging, key = std::move(key), captured = std::move(captured), stageShaders = std::move(stageShaders)]() mutable {
         try {
-            slot->resources = std::make_shared<ShaderResources>(context, stageShaders, target, colors, indexAddress, static_cast<std::size_t>(indexBytes), captured, staging, true);
+            if (key.empty() || !SharedResourceCache().Holds(key)) slot->resources = std::make_shared<ShaderResources>(context, stageShaders, target, colors, indexAddress, static_cast<std::size_t>(indexBytes), captured, staging, true);
         } catch (...) {
             slot->failure = std::current_exception();
         }

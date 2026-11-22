@@ -48,7 +48,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
 // derived from the draw-staging switches alone, so a slot whose consumer would not be recordable is
 // dropped at the consume and the commit builds inline. Returns null when the pool is off, the draw
 // cannot be pooled or no worker has headroom.
-std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots);
+std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, const std::vector<std::uint32_t>& contentKey);
 std::vector<std::uint32_t> DrawResourceContentKey(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders);
 
 struct PixelFunctionLdsLayouts {

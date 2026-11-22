@@ -2375,6 +2375,32 @@ if(BUILD_TESTING)
             set_source_files_properties(${LIBS_INCLUDE_DIR}/tests/ExceptionCCleanup.c PROPERTIES COMPILE_OPTIONS -fexceptions)
             target_link_libraries(exception_c_cleanup_tests PRIVATE libc)
             add_test(NAME exception_c_cleanup COMMAND exception_c_cleanup_tests)
+            if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+                enable_language(ASM)
+                add_test_executable(exception_stack_pointer_tests
+                    ${LIBS_INCLUDE_DIR}/tests/ExceptionStackPointer.cpp
+                    ${LIBS_INCLUDE_DIR}/tests/ExceptionStackPointer.S)
+                target_include_directories(exception_stack_pointer_tests PRIVATE ${LIBS_INCLUDE_DIR})
+                target_link_libraries(exception_stack_pointer_tests PRIVATE libc)
+                add_test(NAME exception_stack_pointer COMMAND exception_stack_pointer_tests)
+                if(ANYPS5_CLANG_EXCEPTION_STACK_POINTER_TESTS)
+                    if(NOT ANYPS5_CLANGXX)
+                        message(FATAL_ERROR "ANYPS5_CLANG_EXCEPTION_STACK_POINTER_TESTS needs ANYPS5_CLANGXX set to a clang++ path")
+                    endif()
+                    set(exception_stack_pointer_clang_object ${CMAKE_CURRENT_BINARY_DIR}/ExceptionStackPointerClang.o)
+                    add_custom_command(
+                        OUTPUT ${exception_stack_pointer_clang_object}
+                        COMMAND ${ANYPS5_CLANGXX} -std=c++20 -O2 -fexceptions -I${LIBS_INCLUDE_DIR}
+                            -c ${LIBS_INCLUDE_DIR}/tests/ExceptionStackPointerClang.cpp -o ${exception_stack_pointer_clang_object}
+                        DEPENDS ${LIBS_INCLUDE_DIR}/tests/ExceptionStackPointerClang.cpp
+                        VERBATIM)
+                    add_executable(exception_stack_pointer_clang_tests ${exception_stack_pointer_clang_object})
+                    set_target_properties(exception_stack_pointer_clang_tests PROPERTIES
+                        LINKER_LANGUAGE CXX RUNTIME_OUTPUT_DIRECTORY ${ANYPS5_TEST_OUTPUT_DIRECTORY})
+                    target_link_libraries(exception_stack_pointer_clang_tests PRIVATE libc)
+                    add_test(NAME exception_stack_pointer_clang COMMAND exception_stack_pointer_clang_tests)
+                endif()
+            endif()
             add_test_executable(guest_image_anonymous_tests ${LIBS_INCLUDE_DIR}/tests/GuestImageAnonymous.cpp)
             target_include_directories(guest_image_anonymous_tests PRIVATE ${LIBS_INCLUDE_DIR})
             target_link_libraries(guest_image_anonymous_tests PRIVATE libc)

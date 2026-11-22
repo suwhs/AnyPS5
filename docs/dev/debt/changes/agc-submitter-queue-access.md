@@ -1,0 +1,5 @@
+# libSceAgcDriver
+
+## add the queue submitter to every host access of the recorder's queue
+
+- [QueueAccess and the recorder submit](../../../core/libs/prx/libSceAgcDriver/Graphics/src/QueueSubmitter.cpp) (libSceAgcDriver) - with `APS5_ASYNC_SUBMIT` a recorder batch's `vkQueueSubmit` runs on a per-queue submitter thread, so every other host access of that queue must be externally synchronized with it: `Graphics::QueueAccess` drains the submitter's queued submits and takes the submitter's queue lock for the scope it guards. The guarded sites are the recorder's own submit, `VulkanDevice::WaitIdle`, the present clear submit, `VulkanDevice::QueuePresent`, the deferred-objects queue wait, `CommandBatch::release` and the import settle and probe submits. A new `vkQueueSubmit`, `vkQueueWaitIdle` or `vkQueuePresentKHR` on the recorder's queue that does not use `QueueAccess` races with the submitter thread, which is undefined behaviour that no title has been measured to hit. Closes when: every host access of the recorder's queue goes through `QueueAccess`, or the queue is only ever touched by the submitter.

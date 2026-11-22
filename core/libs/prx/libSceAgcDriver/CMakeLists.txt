@@ -468,6 +468,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/CommandStream.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/CommandThunks.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/SealedBatch.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/QueueSubmitter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ParallelCompare.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderInputState.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderResources.cpp

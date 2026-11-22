@@ -9,6 +9,7 @@
 #include "prx/libc/include/HostThreadSlot.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ThreadScratch.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/QueueSubmitter.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BdaResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ReferenceStorage.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
@@ -1446,6 +1447,7 @@ Recorder::~Recorder() {
     } catch (const std::exception& error) {
         std::fprintf(stderr, "[gpu] recorder teardown: %s\n", error.what());
     }
+    if (auto* submitter = QueueSubmitter::Existing(context.queue)) submitter->Drain();
     ForgetHtileMasks_nid_no_patch(id);
     latch.Shutdown();
     if (executor != nullptr) executor->Shutdown();
@@ -4994,15 +4996,22 @@ void Recorder::Submit() {
     DestroyDeferredAtIdle(context);
     const auto submitStart = std::chrono::steady_clock::now();
     batch->submitStarted.store(true, std::memory_order_release);
-    const auto result = function(queueSubmit, "vkQueueSubmit")(context.queue, 1, &submission, batch->fence);
-    const bool queuedNothing = result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST;
-    if (batch->sealed != nullptr && !queuedNothing) batch->sealed->Returned(result);
-    if (result == VK_ERROR_DEVICE_LOST) {
-        const auto idle = context.Function<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(context.device);
-        if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
-        if (batch->sealed != nullptr) batch->sealed->DeviceIdleAfterLoss();
+    if (QueueSubmitter::Enabled()) {
+        auto& submitter = QueueSubmitter::For(context.device, context.queue, function(queueSubmit, "vkQueueSubmit"));
+        batch->submitResult = VK_SUCCESS;
+        batch->submitPosition = submitter.Enqueue({submitted, batch->fence, hold, holdValue, timeline, serial, &batch->submitResult});
+        batch->submitter = &submitter;
+    } else {
+        const auto result = function(queueSubmit, "vkQueueSubmit")(context.queue, 1, &submission, batch->fence);
+        const bool queuedNothing = result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST;
+        if (batch->sealed != nullptr && !queuedNothing) batch->sealed->Returned(result);
+        if (result == VK_ERROR_DEVICE_LOST) {
+            const auto idle = context.Function<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(context.device);
+            if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
+            if (batch->sealed != nullptr) batch->sealed->DeviceIdleAfterLoss();
+        }
+        Check(result, "vkQueueSubmit recorder");
     }
-    Check(result, "vkQueueSubmit recorder");
     if (batch->guestWork) LibcRunReportMilestone_nid_no_patch(2);
     batch->submitted = true;
     batch->serial = ++submissions;
@@ -5449,6 +5458,19 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool 
         }
     } finishingScope{*this, batch.get()};
     finishing.push_back(batch.get());
+    if (batch->submitter != nullptr) {
+        batch->submitter->WaitSubmitReturned(batch->submitPosition);
+        const auto submitted = batch->submitResult;
+        if (batch->sealed != nullptr) batch->sealed->Returned(submitted);
+        if (submitted != VK_SUCCESS) {
+            if (submitted == VK_ERROR_DEVICE_LOST) {
+                const auto idle = context.Function<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(context.device);
+                if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
+                if (batch->sealed != nullptr) batch->sealed->DeviceIdleAfterLoss();
+            }
+            Check(submitted, "vkQueueSubmit recorder");
+        }
+    }
     if (wait) {
         // APS5_PROFILE_DRAW: how long the CPU waits for recorded GPU work, reported every 10 s.
         static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;

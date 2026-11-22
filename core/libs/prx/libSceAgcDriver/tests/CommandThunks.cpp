@@ -1567,6 +1567,53 @@ void DemotedTypedStreamReplaysEveryArgumentInOrder() {
     Require(stream.Ops() == 25, "the demoted stream kept " + std::to_string(stream.Ops()) + " records for the 25 commands before its demotion");
 }
 
+void TypedAndThunkPathsMixInOneStream() {
+    using AgcDriver::Graphics::DeviceFunctions;
+    const auto exact = exactFunctions();
+    DeviceFunctions deviceTable{};
+    fillExactDeviceTable(deviceTable);
+    AgcDriver::Graphics::Context context{};
+    context.functions = &deviceTable;
+    CommandFunctions directBatch = exact;
+    directBatch.listed = &deviceTable;
+    CommandFunctions streamedBatch = AgcDriver::Graphics::StreamedCommands();
+    streamedBatch.listed = &deviceTable;
+    const auto target = FakeCommandBuffer(75);
+    Sources sources;
+    prepare(sources);
+    const auto typed = [&](const CommandFunctions* batch, VkCommandBuffer commands) {
+        context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdBindPipeline, &DeviceFunctions::cmdBindPipeline, "vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, fake<VkPipeline>(110));
+        context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdDraw, &DeviceFunctions::cmdDraw, "vkCmdDraw")(commands, 17, 2, 3, 4);
+        context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetViewport, &DeviceFunctions::cmdSetViewport, "vkCmdSetViewport")(commands, 0, 3, sources.viewports.data());
+    };
+    const auto thunked = [&](const CommandFunctions& table, VkCommandBuffer commands) {
+        table.CmdPipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0, nullptr, 1, sources.bufferBarriers.data(), 0, nullptr);
+        table.CmdPushConstants(commands, fake<VkPipelineLayout>(111), VK_SHADER_STAGE_VERTEX_BIT, 0, 20, sources.constants.data());
+        table.CmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, fake<VkPipelineLayout>(112), 0, 3, sources.sets.data(), 4, sources.dynamicOffsets.data());
+        table.CmdDrawIndexed(commands, 19, 2, 3, -4, 5);
+    };
+    captured.clear();
+    capturedCommands.clear();
+    typed(&directBatch, target);
+    thunked(exact, target);
+    typed(&directBatch, target);
+    const auto expected = captured;
+    const auto commandsAt = capturedCommands;
+    Require(commandsAt.size() == 10, "the mixed reference captured " + std::to_string(commandsAt.size()) + " commands");
+    CommandStream stream(exact);
+    const auto& streamed = AgcDriver::Graphics::StreamedCommands();
+    captured.clear();
+    capturedCommands.clear();
+    typed(&streamedBatch, stream.Handle());
+    thunked(streamed, stream.Handle());
+    typed(&streamedBatch, stream.Handle());
+    Require(captured.empty() && stream.Materialized() == VK_NULL_HANDLE && !stream.Poisoned(), "a mixed typed and thunked command did not stay in the stream");
+    std::memset(static_cast<void*>(&sources), 0xA5, sizeof(sources));
+    stream.Seal();
+    AgcDriver::Graphics::Replay(stream, target, exact);
+    Require(captured == expected, "the mixed typed and thunked replay differs: " + firstByteDifference(expected, captured, commandsAt));
+}
+
 std::string firstByteDifference(const std::string& expected, const std::string& actual, const std::vector<std::pair<std::size_t, std::string>>& commands) {
     const auto length = std::min(expected.size(), actual.size());
     std::size_t index = 0;
@@ -1839,6 +1886,7 @@ int main(int argc, char** argv) {
         PlainStreamersKeepEveryArgument();
         OverlayTablesRecordWhatDirectRecords();
         DemotedTypedStreamReplaysEveryArgumentInOrder();
+        TypedAndThunkPathsMixInOneStream();
         PushDescriptorsDemoteOnlyWhatTheyCannotCopy();
         DemotionWithoutAMaterializerPoisons();
         EntryPointsBeyondTheSlotsAreKeyedByDevice();

@@ -72,6 +72,7 @@ struct MockDevice {
 
 MockDevice mock;
 std::mutex mockLock;
+std::vector<std::string> cmdLog;
 
 bool Owner() {
     return std::this_thread::get_id() == mock.owner;
@@ -219,8 +220,12 @@ VKAPI_ATTR VkResult VKAPI_CALL mockDeviceWaitIdle(VkDevice) {
     return mock.idleResult;
 }
 
-VKAPI_ATTR void VKAPI_CALL mockCmdUpdateBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkDeviceSize, const void*) {}
-VKAPI_ATTR void VKAPI_CALL mockCmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t, const VkImageMemoryBarrier*) {}
+VKAPI_ATTR void VKAPI_CALL mockCmdUpdateBuffer(VkCommandBuffer, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size, const void*) {
+    cmdLog.push_back("update " + std::to_string(reinterpret_cast<std::uintptr_t>(buffer)) + " " + std::to_string(offset) + " " + std::to_string(size));
+}
+VKAPI_ATTR void VKAPI_CALL mockCmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags source, VkPipelineStageFlags destination, VkDependencyFlags, std::uint32_t memory, const VkMemoryBarrier*, std::uint32_t buffers, const VkBufferMemoryBarrier*, std::uint32_t images, const VkImageMemoryBarrier*) {
+    cmdLog.push_back("barrier " + std::to_string(source) + " " + std::to_string(destination) + " " + std::to_string(memory) + " " + std::to_string(buffers) + " " + std::to_string(images));
+}
 VKAPI_ATTR void VKAPI_CALL mockCmdBeginQuery(VkCommandBuffer, VkQueryPool, std::uint32_t, VkQueryControlFlags) {}
 VKAPI_ATTR void VKAPI_CALL mockCmdEndQuery(VkCommandBuffer, VkQueryPool, std::uint32_t) {}
 VKAPI_ATTR void VKAPI_CALL mockCmdResetQueryPool(VkCommandBuffer, VkQueryPool, std::uint32_t, std::uint32_t) {}
@@ -229,8 +234,17 @@ VKAPI_ATTR void VKAPI_CALL mockCmdBindPipeline(VkCommandBuffer, VkPipelineBindPo
 VKAPI_ATTR void VKAPI_CALL mockCmdPushConstants(VkCommandBuffer, VkPipelineLayout, VkShaderStageFlags, std::uint32_t, std::uint32_t, const void*) {}
 VKAPI_ATTR void VKAPI_CALL mockCmdDispatch(VkCommandBuffer, std::uint32_t, std::uint32_t, std::uint32_t) {}
 
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateCommandPool(VkDevice, const VkCommandPoolCreateInfo*, const VkAllocationCallbacks*, VkCommandPool* pool) {
+    *pool = reinterpret_cast<VkCommandPool>(mock.next++);
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockDestroyCommandPool(VkDevice, VkCommandPool, const VkAllocationCallbacks*) {}
+
 PFN_vkVoidFunction VKAPI_CALL mockProc(VkDevice, const char* name) {
     static const std::map<std::string_view, PFN_vkVoidFunction> table{
+        {"vkCreateCommandPool", reinterpret_cast<PFN_vkVoidFunction>(mockCreateCommandPool)},
+        {"vkDestroyCommandPool", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyCommandPool)},
         {"vkAllocateCommandBuffers", reinterpret_cast<PFN_vkVoidFunction>(mockAllocateCommandBuffers)},
         {"vkFreeCommandBuffers", reinterpret_cast<PFN_vkVoidFunction>(mockFreeCommandBuffers)},
         {"vkCreateFence", reinterpret_cast<PFN_vkVoidFunction>(mockCreateFence)},
@@ -610,8 +624,47 @@ void WalksAgree() {
 
 }
 
+void StreamFidelity() {
+    mock = MockDevice{};
+    mock.owner = std::this_thread::get_id();
+#ifdef _WIN32
+    _putenv_s("APS5_SEALED_STREAM", "1");
+#else
+    setenv("APS5_SEALED_STREAM", "1", 1);
+#endif
+    cmdLog.clear();
+    const auto store = [](Recorder& recorder, int first, const std::function<void(Recorder&)>& opened) {
+        for (int batch = 0; batch < 2; ++batch) {
+            for (int item = 0; item < 2; ++item) {
+                const int index = first + batch * 2 + item;
+                recorder.RecordStore(reinterpret_cast<VkBuffer>(std::uintptr_t{0x5000} + static_cast<std::uintptr_t>(index)), 0, std::span<const std::byte>(memory.data(), Length), Address(index));
+            }
+            recorder.FlushStores();
+            if (batch == 0) opened(recorder);
+            recorder.Submit();
+            recorder.Sync();
+        }
+    };
+    {
+        Recorder direct(mockContext(), false, false, 0);
+        store(direct, 11, [](Recorder& opened) { Expect(Mode::Fenced, !opened.Deferred(), "a recorder without the sealed stream opened one"); });
+    }
+    const auto expected = cmdLog;
+    Expect(Mode::Fenced, !expected.empty(), "the direct recorder recorded no command");
+    cmdLog.clear();
+    {
+        Recorder streamed(mockContext(), false, true, 1);
+        store(streamed, 11, [](Recorder& opened) {
+            Expect(Mode::Fenced, opened.Deferred(), "the streamed recorder did not open a sealed stream");
+            Expect(Mode::Fenced, opened.StreamOps() != 0, "the streamed recorder appended no record");
+        });
+    }
+    Expect(Mode::Fenced, cmdLog == expected, "the sealed stream replayed a different command sequence than the direct recorder recorded");
+}
+
 int main() {
     try {
+        StreamFidelity();
         for (const auto mode : Modes) {
             Configuration(mode);
             ReapCost(mode);

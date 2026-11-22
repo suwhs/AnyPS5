@@ -140,6 +140,14 @@ void windowDrawableSize(void* context, std::uint32_t* width, std::uint32_t* heig
     });
 }
 
+bool windowVisible(void* context) {
+    if (context == nullptr) return true;
+    return OnMainThread([&] {
+        const auto flags = SDL_GetWindowFlags(static_cast<SDL_Window*>(context));
+        return (flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED)) == 0;
+    });
+}
+
 void checkConfig(const VideoOutConfig& cfg) {
     cfg.Check();
 }
@@ -689,7 +697,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         timing.Mark("frame_limit");
         OnMainThread([&] { window.Ensure(req.width, req.height); });
         const auto extensions = windowExtensions(window.Handle());
-        const AgcDriver::PresentationWindow target{window.Handle(), extensions, &createWindowSurface, &windowDrawableSize, req.width, req.height, req.timing};
+        const AgcDriver::PresentationWindow target{window.Handle(), extensions, &createWindowSurface, &windowDrawableSize, req.width, req.height, req.timing, &windowVisible};
         timing.Mark("window_prepare");
         const auto gpuReady = [](void* context) {
             auto& request = *static_cast<FlipRequest*>(context);

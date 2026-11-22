@@ -109,6 +109,7 @@ void Driver::Present(const PresentationWindow& window, const DisplayBuffer* buff
         bool trailing = false;
         bool queueUnlocked = false;
         double waitedMs = 0;
+        const bool windowVisible = window.visible == nullptr || window.visible(window.context);
         {
             GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Present);
             std::lock_guard lock(GuestMemory::GpuMutex());
@@ -116,14 +117,16 @@ void Driver::Present(const PresentationWindow& window, const DisplayBuffer* buff
             require(device != nullptr && device->Window() == window.context, "presentation window is not attached to the device");
             presenting = device;
             timing.Mark("device_setup");
-            std::uint32_t drawableWidth = 0;
-            std::uint32_t drawableHeight = 0;
-            window.getDrawableSize(window.context, &drawableWidth, &drawableHeight);
-            presenting->Resize(drawableWidth, drawableHeight);
-            presenting->SelectDynamicRange(buffer);
-            timing.Mark("resize");
-            presentable = presenting->Presentable();
-            if (buffer != nullptr) require(buffer->width == window.width && buffer->height == window.height, "display buffer extent differs from output");
+            if (windowVisible) {
+                std::uint32_t drawableWidth = 0;
+                std::uint32_t drawableHeight = 0;
+                window.getDrawableSize(window.context, &drawableWidth, &drawableHeight);
+                presenting->Resize(drawableWidth, drawableHeight);
+                presenting->SelectDynamicRange(buffer);
+                timing.Mark("resize");
+                presentable = presenting->Presentable();
+                if (buffer != nullptr) require(buffer->width == window.width && buffer->height == window.height, "display buffer extent differs from output");
+            }
         }
 
         if (presentable && !syncFlip) {

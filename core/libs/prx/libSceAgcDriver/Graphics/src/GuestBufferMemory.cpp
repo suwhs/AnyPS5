@@ -1726,8 +1726,23 @@ bool importKeepsReregistered() {
     return enabled;
 }
 
+bool joinHostAccessRuns() {
+    static const bool enabled = std::getenv("APS5_JOIN_HOST_ACCESS") != nullptr;
+    return enabled;
+}
+
+std::uint64_t joinGapLimit() {
+    static const std::uint64_t bytes = [] {
+        const char* value = std::getenv("APS5_JOIN_GAP_KIB");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) << 10u : 0u;
+    }();
+    return bytes;
+}
+
 bool continuesRun(const GuestAllocations::Range& before, const GuestAllocations::Range& after) {
-    return before.address + before.bytes == after.address && before.HostReadable() && after.HostReadable() && before.readable == after.readable && before.writable == after.writable && before.gpu == after.gpu && before.HostWritable() == after.HostWritable();
+    if (before.address + before.bytes != after.address || !before.HostReadable() || !after.HostReadable() || before.gpu != after.gpu) return false;
+    if (joinHostAccessRuns()) return before.HostWritable() == after.HostWritable();
+    return before.readable == after.readable && before.writable == after.writable && before.HostWritable() == after.HostWritable();
 }
 
 std::size_t leasedIndexContaining(const GuestAllocations::Lease& lease, std::uint64_t address) {
@@ -1869,11 +1884,6 @@ ImportRun exactRun(const GuestAllocations::Lease& lease, std::uint64_t base, std
     return lease[last]->address + lease[last]->bytes == base + bytes ? leasedRun(lease, first, last) : ImportRun{};
 }
 
-bool runCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end) {
-    const auto bounds = importRunBounds(lease, begin);
-    return bounds.found && end <= lease[bounds.last]->address + lease[bounds.last]->bytes;
-}
-
 ImportRun crossedRun(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end) {
     auto last = leasedIndexContaining(lease, begin);
     if (last == lease.size()) return {};
@@ -1886,6 +1896,29 @@ ImportRun crossedRun(const GuestAllocations::Lease& lease, std::uint64_t begin, 
     ImportRun run{lease[first]->address, lease[last]->address + lease[last]->bytes - lease[first]->address, {}};
     run.ranges.assign(lease.begin() + static_cast<std::ptrdiff_t>(first), lease.begin() + static_cast<std::ptrdiff_t>(last) + 1);
     return run;
+}
+
+ImportRun gapTolerantRun(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, std::uint64_t gapLimit) {
+    if (gapLimit == 0u || begin >= end || lease.empty()) return {};
+    const auto from = std::lower_bound(lease.begin(), lease.end(), begin, [](const auto& range, std::uint64_t address) { return range->address + range->bytes <= address; });
+    if (from == lease.end() || (*from)->address > begin || !(*from)->HostReadable()) return {};
+    ImportRun run{begin, end - begin, {}};
+    std::uint64_t cursor = begin;
+    for (auto it = from; it != lease.end() && (*it)->address < end; ++it) {
+        const auto& range = **it;
+        if (!range.HostReadable()) return {};
+        if (range.address > cursor + gapLimit) return {};
+        cursor = std::max(cursor, range.address + range.bytes);
+        run.ranges.push_back(*it);
+    }
+    return cursor >= end ? run : ImportRun{};
+}
+
+bool runCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end) {
+    const auto bounds = importRunBounds(lease, begin);
+    if (bounds.found && end <= lease[bounds.last]->address + lease[bounds.last]->bytes) return true;
+    if (joinHostAccessRuns() && !crossedRun(lease, begin, end).ranges.empty()) return true;
+    return !gapTolerantRun(lease, begin, end, joinGapLimit()).ranges.empty();
 }
 
 ImportRun joinedRun(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, bool straddling = false) {
@@ -2348,6 +2381,12 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
     }
     auto run = bounds.found ? leasedRun(lease, bounds.first, bounds.last) : ImportRun{};
     if (end != 0) run = windowRun(state, std::move(run), address, end, context.hostImportAlignment);
+    if (end != 0 && (run.ranges.empty() || run.base > address || run.base + run.bytes < end)) {
+        const auto limit = importMaxBytes.load(std::memory_order_relaxed);
+        auto candidate = joinHostAccessRuns() ? crossedRun(lease, address, end) : ImportRun{};
+        if (candidate.ranges.empty()) candidate = gapTolerantRun(lease, address, end, joinGapLimit());
+        if (!candidate.ranges.empty() && candidate.base == address && candidate.bytes <= largest && (limit == 0 || candidate.bytes <= limit)) run = std::move(candidate);
+    }
     if (run.ranges.empty()) return nullptr;
     return importRunAt(context, state, std::move(run), false, address, lease, end, evict, requester);
 }
@@ -2440,6 +2479,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
         found->second.lastUse = ++state.useCounter;
         return &found->second;
     }
+    if (const auto blocked = state.failedBlocks.find(std::pair{base, bytes}); blocked != state.failedBlocks.end() && sameRun(blocked->second, run)) return nullptr;
     if (alignment == 0 || base % alignment != 0 || bytes % alignment != 0) return nullptr;
     if (const auto limit = importMaxBytes.load(std::memory_order_relaxed); limit != 0 && bytes > limit) return nullptr;
     if (const auto failed = failures.find(base); !stepDown && failed != failures.end()) {

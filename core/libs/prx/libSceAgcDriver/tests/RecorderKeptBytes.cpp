@@ -1,4 +1,5 @@
 #include <limits>
+#include "FakeHandles.hpp"
 #include <stdexcept>
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -50,7 +51,7 @@ std::vector<char> commandOrder;
 std::vector<std::pair<VkPipelineStageFlags, VkAccessFlags>> barrierMasks;
 
 VKAPI_ATTR VkResult VKAPI_CALL mockAllocateCommandBuffers(VkDevice, const VkCommandBufferAllocateInfo*, VkCommandBuffer* commands) {
-    *commands = reinterpret_cast<VkCommandBuffer>(mock.next++);
+    *commands = FakeCommandBuffer(mock.next++);
     ++mock.allocatedCommands;
     return VK_SUCCESS;
 }

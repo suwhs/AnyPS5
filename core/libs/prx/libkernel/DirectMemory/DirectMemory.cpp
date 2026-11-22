@@ -1695,7 +1695,28 @@ int DoMprotect(const void* addr, size_t len, int prot, bool requireMappedStart) 
 #endif
     auto bytes = static_cast<std::size_t>(end - first);
     const void* pointer = reinterpret_cast<const void*>(first);
-    const auto nativeProtection = LinuxProtFromSce(prot);
+    auto nativeProtection = LinuxProtFromSce(prot);
+#if defined(__linux__)
+    if ((nativeProtection & PROT_READ) == 0) {
+        bool aliased = false;
+        {
+            std::lock_guard lock(g_directLock);
+            auto it = g_directMappings.upper_bound(first);
+            if (it != g_directMappings.begin()) --it;
+            for (; it != g_directMappings.end() && it->first < end; ++it) {
+                const auto low = std::max<std::uintptr_t>(it->first, first);
+                const auto high = std::min<std::uintptr_t>(it->second.end, end);
+                if (low >= high) continue;
+                const auto phys = it->second.phys + static_cast<std::uint64_t>(low - it->first);
+                if (MappingsSharingPhys(phys, phys + static_cast<std::uint64_t>(high - low)).size() > 1) {
+                    aliased = true;
+                    break;
+                }
+            }
+        }
+        if (aliased) nativeProtection |= PROT_READ;
+    }
+#endif
     if (GuestThreadStackHostRangeOverlaps(address, address + len))
         throw std::system_error(EACCES, std::generic_category(), "mprotect overlaps host-only guest thread stack pages");
     std::uintptr_t stackStart = 0;

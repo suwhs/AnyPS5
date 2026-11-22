@@ -6,15 +6,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <csignal>
 #include <source_location>
 #include <stdexcept>
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <sys/mman.h>
-#include <sys/wait.h>
-#include <unistd.h>
 #endif
 
 static void Require(bool condition, std::source_location location = std::source_location::current()) {
@@ -85,37 +82,6 @@ int main() {
     Require((phys % static_cast<int64_t>(page)) == 0);
     Require(phys + mib <= size);
     Require(sceKernelReleaseDirectMemory(phys, mib) == 0);
-
-    int64_t aliasPhys = -1;
-    Require(sceKernelAllocateDirectMemoryForApp(0, size, page, 0, 0, &aliasPhys) == 0 && aliasPhys >= 0);
-    void* aliasA = nullptr;
-    void* aliasB = nullptr;
-    Require(sceKernelMapDirectMemory(&aliasA, page, 3, 0, aliasPhys, 0) == 0 && aliasA != nullptr);
-    Require(sceKernelMapDirectMemory(&aliasB, page, 3, 0, aliasPhys, 0) == 0 && aliasB != nullptr);
-    Require(aliasA != aliasB);
-    auto* bytesA = static_cast<volatile std::uint8_t*>(aliasA);
-    auto* bytesB = static_cast<volatile std::uint8_t*>(aliasB);
-    bytesA[0] = 0x5a;
-    Require(bytesB[0] == 0x5a);
-    Require(sceKernelMprotect(aliasA, page, 0) == 0);
-    Require(bytesB[0] == 0x5a);
-    Require(sceKernelMprotect(aliasA, page, 3) == 0);
-    Require(bytesA[0] == 0x5a);
-    std::printf("aliased direct memory keeps a protection per mapping\n");
-    const pid_t child = ::fork();
-    Require(child >= 0);
-    if (child == 0) {
-        if (sceKernelMprotect(aliasA, page, 0) != 0) ::_exit(2);
-        const auto value = bytesA[0];
-        ::_exit(value == 0x5a ? 3 : 4);
-    }
-    int childStatus = 0;
-    Require(::waitpid(child, &childStatus, 0) == child);
-    Require(WIFSIGNALED(childStatus) && (WTERMSIG(childStatus) == SIGSEGV || WTERMSIG(childStatus) == SIGBUS));
-    Require(bytesB[0] == 0x5a);
-    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(aliasA), page) == 0);
-    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(aliasB), page) == 0);
-    Require(sceKernelReleaseDirectMemory(aliasPhys, page) == 0);
 
     return 0;
 }

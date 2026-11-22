@@ -3961,9 +3961,29 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
         }
     }
     if (!stencilReferences.empty()) {
-        Require(!draw.indirect && !state.primitiveRestart && !state.rectList && !state.quadList && !state.stages.mesh && !state.stages.tessellation && (state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || StencilReplayStrip(context, state, shaders)), "stencil replay supports direct triangle lists, and triangle strips whose triangles share one face state and have no flat parameters, without restart, mesh or tessellation");
-        Require(!state.depthBiasPerFace && !ShadersWriteMemory(shaders), "stencil replay refuses face splits and shader memory writes");
-        Require(std::ranges::all_of(shaders, [](const CompiledShader& shader) { return shader.program != nullptr && shader.program->stencilReplaySafe && (shader.stage == ShaderRecompiler::ShaderStage::Vertex || shader.stage == ShaderRecompiler::ShaderStage::Fragment); }), "stencil replay refuses stages with side effects, clocks, subgroup dependencies or primitive ID inputs");
+        Require(!draw.indirect && !state.primitiveRestart && !state.quadList && !state.stages.mesh && !state.stages.tessellation && (state.rectList ? state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : (state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || StencilReplayStrip(context, state, shaders))), "stencil replay supports direct triangle lists, triangle strips whose triangles share one face state and have no flat parameters, and rect lists, without restart, mesh or tessellation");
+        std::vector<CompiledShader> replayedStages;
+        replayedStages.reserve(shaders.size());
+        for (const auto& shader : shaders) {
+            const bool generatedRectStage = state.rectList && (shader.stage == ShaderRecompiler::ShaderStage::TessellationControl || shader.stage == ShaderRecompiler::ShaderStage::TessellationEvaluation);
+            if (!generatedRectStage) replayedStages.push_back(shader);
+        }
+        Require(!state.depthBiasPerFace && !ShadersWriteMemory(replayedStages), "stencil replay refuses face splits and shader memory writes");
+        const auto replayRefusal = [](const CompiledShader& shader) -> const char* {
+            if (shader.program == nullptr) return "no compiled program";
+            if (shader.stage != ShaderRecompiler::ShaderStage::Vertex && shader.stage != ShaderRecompiler::ShaderStage::Fragment) return "a stage that is neither vertex nor fragment";
+            if (!shader.program->stencilReplaySafe) {
+                if (shader.stage == ShaderRecompiler::ShaderStage::Vertex) return "a vertex stage that is not replay-safe";
+                return shader.program->stencilReferences.empty() ? "a fragment stage compiled without the stencil replay variant" : "a replay form with side effects, clocks, subgroup dependencies or primitive ID inputs";
+            }
+            return nullptr;
+        };
+        for (const auto& shader : replayedStages) {
+            const auto* refusal = replayRefusal(shader);
+            if (refusal == nullptr) continue;
+            std::fprintf(stderr, "[stencil] replay refuses stage %u of %zu replayed stages (rectList=%d, %zu stencil references): %s\n", static_cast<unsigned>(shader.stage), replayedStages.size(), state.rectList ? 1 : 0, stencilReferences.size(), refusal);
+            throw std::runtime_error("stencil replay refuses stages with side effects, clocks, subgroup dependencies or primitive ID inputs");
+        }
         if (stencilReferences.size() == 256u) {
             static std::once_flag unbounded;
             std::call_once(unbounded, [] { APS5_LOG_CHARS_OUT("Stencil replay: a draw replays all 256 stencil reference values because its pixel shader's export is not bounded"); });

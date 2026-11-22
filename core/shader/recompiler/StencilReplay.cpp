@@ -2,6 +2,8 @@
 #include "Optimization/MaskedSelectEliminator.hpp"
 #include "Optimization/SrtWalker/SrtInstructionPredicates.hpp"
 #include <spirv/unified1/spirv.hpp>
+#include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <functional>
 #include <iterator>
@@ -1283,6 +1285,20 @@ std::vector<std::uint32_t> StencilReferenceValues(const IrProgram& program) {
 }
 
 std::vector<std::uint32_t> StencilReferenceValues(const IrProgram& program, std::uint32_t shift) {
+    const auto capped = [](std::vector<std::uint32_t> values) {
+        static const std::size_t limit = [] {
+            const char* text = std::getenv("APS5_STENCIL_REPLAY_REFERENCES");
+            return text != nullptr ? static_cast<std::size_t>(std::strtoull(text, nullptr, 10)) : 0u;
+        }();
+        if (limit != 0u && values.size() > limit) {
+            std::vector<std::uint32_t> sampled;
+            sampled.reserve(limit);
+            const auto count = values.size();
+            for (std::size_t index = 0; index < limit; ++index) sampled.push_back(values[limit > 1u ? index * (count - 1u) / (limit - 1u) : 0u]);
+            values = std::move(sampled);
+        }
+        return values;
+    };
     std::set<std::uint32_t> result;
     for (const auto& block : program.Blocks()) {
         for (const auto* instruction : block->Instructions()) {
@@ -1294,12 +1310,12 @@ std::vector<std::uint32_t> StencilReferenceValues(const IrProgram& program, std:
             if (!values) {
                 std::vector<std::uint32_t> all(256u);
                 std::iota(all.begin(), all.end(), 0u);
-                return all;
+                return capped(std::move(all));
             }
             for (const auto value : *values) result.insert((value >> shift) & 0xffu);
         }
     }
-    return {result.begin(), result.end()};
+    return capped({result.begin(), result.end()});
 }
 
 bool StencilReferenceDefinedForKeptInvocations(const IrProgram& program) {
@@ -1440,14 +1456,24 @@ bool StencilReplayNeedsStore(const IrProgram& program, std::span<const std::uint
     return StencilReplayLanesFixed(capabilities) && !StencilReplaySafe(program, false);
 }
 
-bool StencilReplaySafe(const IrProgram& program, bool lanesFixed) {
-    if (program.Info().sharedMemoryBytes != 0u || program.Info().bdaWrites || (program.Info().usesFaultBuffer && program.Resources().guardedSrtSlots.empty())) return false;
-    if (program.Info().usesFaultBuffer && !FaultControlFlowAcyclic(program)) return false;
-    for (const auto& input : program.Info().inputs) if (input.kind == StageInputKind::PrimitiveId) return false;
+bool StencilReplaySafe(const IrProgram& program, bool lanesFixed, bool exactLanes) {
+    static const bool trace = std::getenv("APS5_TRACE_STENCIL_REPLAY") != nullptr;
+    const auto refuse = [&](const char* reason, std::uint32_t detail, bool hasDetail) {
+        if (trace) {
+            if (hasDetail) std::fprintf(stderr, "[stencil] not replay-safe (stage %u): %s detail=%u\n", static_cast<unsigned>(program.Resources().stage), reason, detail);
+            else std::fprintf(stderr, "[stencil] not replay-safe (stage %u): %s\n", static_cast<unsigned>(program.Resources().stage), reason);
+        }
+        return false;
+    };
+    if (program.Info().sharedMemoryBytes != 0u) return refuse("shared memory (LDS) is used", program.Info().sharedMemoryBytes, true);
+    if (program.Info().bdaWrites) return refuse("the shader writes guest memory through BDA", 0u, false);
+    if (program.Info().usesFaultBuffer && program.Resources().guardedSrtSlots.empty()) return refuse("the fault buffer has no guarded slots", 0u, false);
+    if (program.Info().usesFaultBuffer && !FaultControlFlowAcyclic(program)) return refuse("the fault control flow is cyclic", 0u, false);
+    for (const auto& input : program.Info().inputs) if (input.kind == StageInputKind::PrimitiveId) return refuse("the shader reads PrimitiveId", 0u, false);
     bool masks = false;
     WaveUniformValues uniform(program);
     for (const auto& info : program.Metadata().blockInfo) {
-        if (info.terminator.loopHeader) return false;
+        if (exactLanes && info.terminator.loopHeader) return refuse("a loop header", 0u, false);
         if (info.terminator.kind != TerminatorKind::ConditionalBranch) continue;
         const auto kind = info.terminator.condition;
         masks = masks || kind == BranchCondition::ExecZero || kind == BranchCondition::ExecNonZero || kind == BranchCondition::VccZero || kind == BranchCondition::VccNonZero;
@@ -1455,11 +1481,11 @@ bool StencilReplaySafe(const IrProgram& program, bool lanesFixed) {
     for (const auto& block : program.Blocks()) {
         for (const auto* instruction : block->Instructions()) {
             const auto opcode = instruction->Opcode();
-            if (opcode == IrOpcode::Loop || opcode == IrOpcode::LoopMerge || opcode == IrOpcode::ImageBvhIntersectRay || BufferAccessOf(opcode) == BufferAccess::Atomic || AddressOpcodeInfoOf(opcode).access == AddressAccess::Write || AddressOpcodeInfoOf(opcode).access == AddressAccess::Atomic || SharedAccessOf(opcode) != SharedAccess::None || ImageOpcodeInfoOf(opcode).access == ImageAccess::Write || ImageOpcodeInfoOf(opcode).access == ImageAccess::Atomic) return false;
-            if (opcode == IrOpcode::UndefU1 || opcode == IrOpcode::UndefU8 || opcode == IrOpcode::UndefU16 || opcode == IrOpcode::UndefU32 || opcode == IrOpcode::UndefU64) return false;
-            if (opcode == IrOpcode::ShaderClock || opcode == IrOpcode::RealtimeClock) return false;
-            if (!lanesFixed && ((opcode == IrOpcode::ReadFirstLane && (instruction->ArgumentCount() == 0u || !uniform.Uniform(instruction->Argument(0)))) || opcode == IrOpcode::ReadLane || opcode == IrOpcode::WriteLane || opcode == IrOpcode::DppMoveU32 || opcode == IrOpcode::DppUpdateU32 || opcode == IrOpcode::Permlane16U32 || opcode == IrOpcode::PermuteU32 || opcode == IrOpcode::BpermuteU32 || opcode == IrOpcode::HalfSwapU32 || opcode == IrOpcode::SwizzleU32)) return false;
-            masks = masks || opcode == IrOpcode::Ballot || opcode == IrOpcode::LaneId || opcode == IrOpcode::WqmU64;
+            if (opcode == IrOpcode::Loop || opcode == IrOpcode::LoopMerge || opcode == IrOpcode::ImageBvhIntersectRay || BufferAccessOf(opcode) == BufferAccess::Atomic || AddressOpcodeInfoOf(opcode).access == AddressAccess::Write || AddressOpcodeInfoOf(opcode).access == AddressAccess::Atomic || SharedAccessOf(opcode) != SharedAccess::None || ImageOpcodeInfoOf(opcode).access == ImageAccess::Write || ImageOpcodeInfoOf(opcode).access == ImageAccess::Atomic) return refuse("a memory, image or ray instruction", static_cast<std::uint32_t>(opcode), true);
+            if (opcode == IrOpcode::UndefU1 || opcode == IrOpcode::UndefU8 || opcode == IrOpcode::UndefU16 || opcode == IrOpcode::UndefU32 || opcode == IrOpcode::UndefU64) return refuse("an undef", static_cast<std::uint32_t>(opcode), true);
+            if (opcode == IrOpcode::ShaderClock || opcode == IrOpcode::RealtimeClock) return refuse("a clock", static_cast<std::uint32_t>(opcode), true);
+            if (exactLanes && !lanesFixed && ((opcode == IrOpcode::ReadFirstLane && (instruction->ArgumentCount() == 0u || !uniform.Uniform(instruction->Argument(0)))) || opcode == IrOpcode::ReadLane || opcode == IrOpcode::WriteLane || opcode == IrOpcode::DppMoveU32 || opcode == IrOpcode::DppUpdateU32 || opcode == IrOpcode::Permlane16U32 || opcode == IrOpcode::PermuteU32 || opcode == IrOpcode::BpermuteU32 || opcode == IrOpcode::HalfSwapU32 || opcode == IrOpcode::SwizzleU32)) return refuse("a cross-lane read or write", static_cast<std::uint32_t>(opcode), true);
+            if (exactLanes) masks = masks || opcode == IrOpcode::Ballot || opcode == IrOpcode::LaneId || opcode == IrOpcode::WqmU64;
             if (!instruction->MayHaveSideEffects()) continue;
             switch (opcode) {
                 case IrOpcode::Branch:
@@ -1490,14 +1516,15 @@ bool StencilReplaySafe(const IrProgram& program, bool lanesFixed) {
                 case IrOpcode::InstPrefetch:
                     break;
                 case IrOpcode::Sendmsg:
-                    if (program.Resources().stage != IrShaderStage::Vertex || instruction->ArgumentCount() != 0u) return false;
+                    if (program.Resources().stage != IrShaderStage::Vertex || instruction->ArgumentCount() != 0u) return refuse("a sendmsg with arguments outside a vertex stage", static_cast<std::uint32_t>(instruction->ArgumentCount()), true);
                     break;
                 default:
-                    return false;
+                    return refuse("an instruction with side effects", static_cast<std::uint32_t>(opcode), true);
             }
         }
     }
-    return lanesFixed || !masks || MaskReplaySafety(program).Check();
+    if (!exactLanes || lanesFixed || !masks || MaskReplaySafety(program).Check()) return true;
+    return refuse("lane masks", 0u, false);
 }
 
 }

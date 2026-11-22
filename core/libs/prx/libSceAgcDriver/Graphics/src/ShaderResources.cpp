@@ -2498,15 +2498,28 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
         if (shaders.size() == 1u) refreshResourceKey = ContentKey(shaders.front(), false, true);
         std::size_t plannedBindings = 0;
         std::size_t plannedAllocations = 0;
+        std::size_t plannedDataBuffers = 0;
+        std::size_t plannedDataBytes = 0;
         for (const auto& shader : shaders) {
             if (shader.program == nullptr) continue;
             plannedBindings += shader.program->bindings.size();
             for (const auto& binding : shader.program->bindings) {
                 if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages && binding.role != ShaderRecompiler::DescriptorRole::GuestSamplers) plannedAllocations += binding.count;
+                if ((binding.role == ShaderRecompiler::DescriptorRole::ShaderData || binding.role == ShaderRecompiler::DescriptorRole::FlattenedSrt) && binding.count == 1u && !binding.guestDescriptor.empty()) {
+                    ++plannedDataBuffers;
+                    plannedDataBytes += binding.guestDescriptor.size() * sizeof(std::uint32_t);
+                }
             }
         }
         bindings.reserve(plannedBindings);
         allocations.reserve(plannedAllocations);
+        if (plannedDataBuffers != 0) {
+            dataSlabAlignment = std::max<VkDeviceSize>(context.limits.minStorageBufferOffsetAlignment, 4);
+            const auto slabBytes = plannedDataBytes + (plannedDataBuffers + 1u) * static_cast<std::size_t>(dataSlabAlignment);
+            if (slabBytes <= context.limits.maxStorageBufferRange) {
+                dataSlab = std::make_shared<Buffer>(context, slabBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            }
+        }
         std::vector<std::uint32_t> occupied;
         occupied.reserve(plannedBindings);
         for (const auto& shader : shaders) {
@@ -3088,8 +3101,8 @@ void ShaderResources::buildComplete() {
             }
             Require(allocation.dataAllocation >= 0, "a guest buffer off the storage buffer offset alignment in a shader without shader data is not implemented");
             auto& data = allocations[static_cast<std::size_t>(allocation.dataAllocation)];
-            Require(data.buffer != nullptr && allocation.dataByte < data.size, "guest buffer offset lies outside the shader's data buffer");
-            data.buffer->Bytes()[allocation.dataByte] = static_cast<std::byte>(allocation.adjustment);
+            Require((data.buffer != nullptr || data.slab != nullptr) && allocation.dataByte < data.size, "guest buffer offset lies outside the shader's data buffer");
+            allocationBytes(data)[allocation.dataByte] = static_cast<std::byte>(allocation.adjustment);
             dataPatches.push_back({static_cast<std::size_t>(allocation.dataAllocation), allocation.dataByte, allocation.adjustment});
         }
         timing.descriptorsMs += phase(BuildPhase::Descriptors);
@@ -3161,7 +3174,7 @@ void ShaderResources::noteReusable() {
     directRegions.clear();
     if (!spaceReusable && (htileClear.has_value() || guestMemory.HasCopiedWrites() || HoldsLease() || usesBda || !multisampleSources.empty() || (bda != nullptr && LoopGuardEnabled()))) return;
     if (std::any_of(textures.begin(), textures.end(), [](const std::shared_ptr<Texture>& texture) { return texture != nullptr && texture->RefreshedPerUse(); })) return;
-    if (TemplateDataRefresh() && std::any_of(allocations.begin(), allocations.end(), [](const Allocation& allocation) { return allocation.buffer != nullptr && !allocation.guest && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap && allocation.size > MaxRefreshBytes; })) return;
+    if (TemplateDataRefresh() && std::any_of(allocations.begin(), allocations.end(), [](const Allocation& allocation) { return (allocation.buffer != nullptr || allocation.slab != nullptr) && !allocation.guest && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap && allocation.size > MaxRefreshBytes; })) return;
     if (spaceReusable) {
         spaceReuse = true;
         reusable = true;
@@ -5669,8 +5682,8 @@ std::string ShaderResources::Describe() const {
             std::snprintf(line, sizeof(line), " buffer%s 0x%llx+0x%zx nz=%.2f", allocation.written ? "" : "(ro)", static_cast<unsigned long long>(allocation.address), allocation.size, sample(allocation.address, allocation.size));
             text += line;
             if (GuestMemory::Accessible(reinterpret_cast<const void*>(allocation.address), allocation.size)) appendWords(reinterpret_cast<const std::uint32_t*>(allocation.address), allocation.size);
-        } else if (allocation.buffer) {
-            const auto bytes = allocation.buffer->Bytes();
+        } else if (allocation.buffer != nullptr || allocation.slab != nullptr) {
+            const auto bytes = allocationBytes(allocation);
             std::snprintf(line, sizeof(line), " data+0x%zx nz=%.2f", allocation.size, sample(reinterpret_cast<std::uint64_t>(bytes.data()), allocation.size));
             text += line;
             appendWords(reinterpret_cast<const std::uint32_t*>(bytes.data()), allocation.size);
@@ -5683,13 +5696,36 @@ std::size_t ShaderResources::addDataBuffer(std::span<const std::uint32_t> words)
     const auto size = words.size() * sizeof(std::uint32_t);
     Require(size <= context.limits.maxStorageBufferRange, "shader data buffer exceeds descriptor range limit");
     const bool refreshable = TemplateDataRefresh() && size <= MaxRefreshBytes;
-    auto buffer = std::make_unique<Buffer>(context, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    std::memcpy(buffer->Bytes().data(), words.data(), size);
-    Allocation allocation{0, size, false, std::move(buffer)};
+    Allocation allocation{0, size, false, nullptr};
+    const auto alignment = static_cast<std::size_t>(dataSlabAlignment);
+    const auto aligned = alignment == 0 ? 0 : (dataSlabUsed + alignment - 1u) / alignment * alignment;
+    if (dataSlab != nullptr && aligned + size <= dataSlab->Bytes().size()) {
+        allocation.slab = dataSlab.get();
+        allocation.slabOffset = aligned;
+        std::memcpy(dataSlab->Bytes().data() + aligned, words.data(), size);
+        dataSlabUsed = aligned + size;
+    } else {
+        auto buffer = std::make_unique<Buffer>(context, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        std::memcpy(buffer->Bytes().data(), words.data(), size);
+        allocation.buffer = std::move(buffer);
+    }
     if (refreshable && keepsTemplateRecords()) allocation.dataWords.assign(words.begin(), words.end());
     allocations.push_back(std::move(allocation));
     mixDataWords(dataWordsHash, allocations.back().dataWords);
     return allocations.size() - 1;
+}
+
+VkBuffer ShaderResources::allocationHandle(const Allocation& allocation) const {
+    return allocation.buffer != nullptr ? allocation.buffer->Handle() : allocation.slab->Handle();
+}
+
+VkDeviceSize ShaderResources::allocationOffset(const Allocation& allocation) const {
+    return allocation.buffer != nullptr ? 0 : allocation.slabOffset;
+}
+
+std::span<std::byte> ShaderResources::allocationBytes(const Allocation& allocation) const {
+    if (allocation.buffer != nullptr) return allocation.buffer->Bytes();
+    return allocation.slab->Bytes().subspan(static_cast<std::size_t>(allocation.slabOffset), allocation.size);
 }
 
 void ShaderResources::rehashDataWords() {
@@ -5697,7 +5733,7 @@ void ShaderResources::rehashDataWords() {
     // Data buffers are the non-guest allocations with a buffer (an address-role allocation has
     // none), appended in binding order by buildPrepare: the order DataWordsHash(shader) hashes.
     for (const auto& allocation : allocations) {
-        if (!allocation.guest && allocation.buffer != nullptr && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap) mixDataWords(dataWordsHash, allocation.dataWords);
+        if (!allocation.guest && (allocation.buffer != nullptr || allocation.slab != nullptr) && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap) mixDataWords(dataWordsHash, allocation.dataWords);
     }
 }
 
@@ -5744,7 +5780,7 @@ bool ShaderResources::refreshData(VkCommandBuffer commands, const CompiledShader
         Require(held->allocations.size() == 1, "data binding without its buffer");
         auto& allocation = allocations[held->allocations.front()];
         const auto size = binding.guestDescriptor.size() * sizeof(std::uint32_t);
-        Require(allocation.buffer != nullptr && !allocation.guest && allocation.size == size && size <= MaxRefreshBytes, "template data buffer cannot take the dispatch's words");
+        Require((allocation.buffer != nullptr || allocation.slab != nullptr) && !allocation.guest && allocation.size == size && size <= MaxRefreshBytes, "template data buffer cannot take the dispatch's words");
         if (allocation.dataWords.size() == binding.guestDescriptor.size() && std::equal(allocation.dataWords.begin(), allocation.dataWords.end(), binding.guestDescriptor.begin())) continue;
         if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) ValidateRuntimeResources(shader, binding.guestDescriptor);
         if (recorder != nullptr && timing == Recorder::NoTiming) timing = recorder->BeginGpuTiming(Recorder::CommandClass::TemplateDataRefresh);
@@ -5767,15 +5803,15 @@ std::optional<std::size_t> ShaderResources::shaderDataAllocation(const CompiledS
         const auto held = std::ranges::find_if(bindings, [&](const Binding& candidate) { return candidate.set < 0 && candidate.layout.binding == binding.binding; });
         if (held == bindings.end() || held->allocations.size() != 1) return std::nullopt;
         const auto allocation = held->allocations.front();
-        if (allocations[allocation].guest || allocations[allocation].buffer == nullptr) return std::nullopt;
+        if (allocations[allocation].guest || (allocations[allocation].buffer == nullptr && allocations[allocation].slab == nullptr)) return std::nullopt;
         return allocation;
     }
     return std::nullopt;
 }
 
-VkBuffer ShaderResources::shaderDataBuffer(const CompiledShader& shader) const {
+VkDescriptorBufferInfo ShaderResources::shaderDataBuffer(const CompiledShader& shader) const {
     const auto allocation = shaderDataAllocation(shader);
-    return allocation.has_value() ? allocations[*allocation].buffer->Handle() : VK_NULL_HANDLE;
+    return allocation.has_value() ? VkDescriptorBufferInfo{allocationHandle(allocations[*allocation]), allocationOffset(allocations[*allocation]), allocations[*allocation].size} : VkDescriptorBufferInfo{};
 }
 
 void ShaderResources::forgetShaderDataWords(const CompiledShader& shader) {
@@ -5786,10 +5822,11 @@ void ShaderResources::forgetShaderDataWords(const CompiledShader& shader) {
 }
 
 void ShaderResources::writeDataWords(VkCommandBuffer commands, std::size_t allocation, std::span<const std::uint32_t> words) const {
-    const auto& buffer = *allocations[allocation].buffer;
+    const auto handle = allocationHandle(allocations[allocation]);
+    const auto offset = allocationOffset(allocations[allocation]);
     const auto size = words.size() * sizeof(std::uint32_t);
     if (std::none_of(dataPatches.begin(), dataPatches.end(), [&](const DataPatch& patch) { return patch.allocation == allocation; })) {
-        context.Resolved(&DeviceFunctions::cmdUpdateBuffer, "vkCmdUpdateBuffer")(commands, buffer.Handle(), 0, size, words.data());
+        context.Resolved(&DeviceFunctions::cmdUpdateBuffer, "vkCmdUpdateBuffer")(commands, handle, offset, size, words.data());
         return;
     }
     std::vector<std::uint32_t> patched(words.begin(), words.end());
@@ -5797,7 +5834,7 @@ void ShaderResources::writeDataWords(VkCommandBuffer commands, std::size_t alloc
     for (const auto& patch : dataPatches) {
         if (patch.allocation == allocation && patch.byte < size) bytes[patch.byte] = static_cast<std::byte>(patch.adjustment);
     }
-    context.Resolved(&DeviceFunctions::cmdUpdateBuffer, "vkCmdUpdateBuffer")(commands, buffer.Handle(), 0, size, patched.data());
+    context.Resolved(&DeviceFunctions::cmdUpdateBuffer, "vkCmdUpdateBuffer")(commands, handle, offset, size, patched.data());
 }
 
 void ShaderResources::PrecollectSurfaces() const {
@@ -7047,9 +7084,9 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
                 if (kept == bindings.end() || kept->allocations.size() != 1) return std::nullopt;
                 const auto index = kept->allocations.front();
                 const auto& item = allocations[index];
-                if (item.guest || item.buffer == nullptr || item.size != binding.guestDescriptor.size() * sizeof(std::uint32_t)) return std::nullopt;
+                if (item.guest || (item.buffer == nullptr && item.slab == nullptr) || item.size != binding.guestDescriptor.size() * sizeof(std::uint32_t)) return std::nullopt;
                 const bool patched = std::any_of(dataPatches.begin(), dataPatches.end(), [&](const DataPatch& patch) { return patch.allocation == index; });
-                const bool same = !item.dataWords.empty() ? item.dataWords == binding.guestDescriptor : !patched && std::memcmp(item.buffer->Bytes().data(), binding.guestDescriptor.data(), item.size) == 0;
+                const bool same = !item.dataWords.empty() ? item.dataWords == binding.guestDescriptor : !patched && std::memcmp(allocationBytes(item).data(), binding.guestDescriptor.data(), item.size) == 0;
                 if (same) continue;
                 if (item.dataWords.empty() && patched) {
                     if (patchedData != nullptr) *patchedData = true;
@@ -7240,13 +7277,13 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         const auto& item = allocations[index];
         const auto override = std::find_if(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation == index; });
         const bool words = override != moved.end() && !override->words.empty();
-        const bool offsets = inPlaceData && !item.guest && item.buffer != nullptr && std::any_of(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return toldInData(entry, index); });
+        const bool offsets = inPlaceData && !item.guest && (item.buffer != nullptr || item.slab != nullptr) && std::any_of(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return toldInData(entry, index); });
         if (words || (offsets && override == moved.end())) {
             const auto size = words ? override->size : item.size;
             auto slice = recorder.DrawUpload(size);
             if (words) std::memcpy(slice.bytes, override->words.data(), size);
             else if (!item.dataWords.empty()) std::memcpy(slice.bytes, item.dataWords.data(), std::min(size, item.dataWords.size() * sizeof(std::uint32_t)));
-            else std::memcpy(slice.bytes, item.buffer->Bytes().data(), size);
+            else std::memcpy(slice.bytes, allocationBytes(item).data(), size);
             for (const auto& patch : dataPatches) {
                 if (patch.allocation == index && patch.byte < size) slice.bytes[patch.byte] = static_cast<std::byte>(patch.adjustment);
             }

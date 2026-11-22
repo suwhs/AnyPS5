@@ -463,7 +463,7 @@ private:
     friend class AgcDriver::VulkanDevice;
     bool refreshData(VkCommandBuffer commands, const CompiledShader& shader, Recorder* recorder);
     std::optional<std::size_t> shaderDataAllocation(const CompiledShader& shader) const;
-    VkBuffer shaderDataBuffer(const CompiledShader& shader) const;
+    VkDescriptorBufferInfo shaderDataBuffer(const CompiledShader& shader) const;
     void forgetShaderDataWords(const CompiledShader& shader);
     struct DescribedRange {
         const char* kind;
@@ -495,7 +495,12 @@ private:
         std::int64_t dataAllocation = -1;
         std::uint32_t dataByte = 0;
         bool oversized = false;
+        Buffer* slab = nullptr;
+        VkDeviceSize slabOffset = 0;
     };
+    VkBuffer allocationHandle(const Allocation& allocation) const;
+    VkDeviceSize allocationOffset(const Allocation& allocation) const;
+    std::span<std::byte> allocationBytes(const Allocation& allocation) const;
     struct DataPatch {
         std::size_t allocation;
         std::uint32_t byte;
@@ -755,6 +760,9 @@ private:
     std::shared_ptr<const TableDescriptors> keptTable(std::size_t set, std::shared_ptr<const std::vector<std::weak_ptr<Texture>>>& held) noexcept;
     std::uint32_t setOf(const Binding& binding) const;
     std::vector<Allocation> allocations;
+    std::shared_ptr<Buffer> dataSlab;
+    std::size_t dataSlabUsed = 0;
+    VkDeviceSize dataSlabAlignment = 0;
     mutable std::vector<VkDescriptorBufferInfo> descriptorBuffers;
     std::vector<VkDescriptorImageInfo> descriptorImages;
     std::vector<VkWriteDescriptorSet> descriptorWrites;

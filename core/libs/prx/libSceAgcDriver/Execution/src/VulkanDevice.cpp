@@ -6136,18 +6136,18 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     std::shared_ptr<Graphics::Buffer> threadArguments;
     if (record.threadGroup != std::array<std::uint32_t, 3>{}) {
         const bool readsLimit = record.shader->program->dispatchThreadLimit;
-        const auto data = readsLimit ? resources.shaderDataBuffer(*record.shader) : VK_NULL_HANDLE;
+        const auto data = readsLimit ? resources.shaderDataBuffer(*record.shader) : VkDescriptorBufferInfo{};
         const auto limitDword = record.shader->program->imageMetadataDword;
-        Graphics::Require(!readsLimit || (data != VK_NULL_HANDLE && limitDword >= 3), "Vulkan dispatch: a thread-dimension dispatch has no ShaderData thread limit");
+        Graphics::Require(!readsLimit || (data.buffer != VK_NULL_HANDLE && limitDword >= 3), "Vulkan dispatch: a thread-dimension dispatch has no ShaderData thread limit");
         const VkDeviceSize limitByte = readsLimit ? static_cast<VkDeviceSize>(limitDword - 3) * sizeof(std::uint32_t) : 0;
         Graphics::RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
         if (argumentImport != nullptr) {
             threadArguments = std::make_shared<Graphics::Buffer>(context, 24, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
             Graphics::Require(recorder.RecordDispatchArguments(commands, argumentImport->address + (arguments - argumentImport->base), threadArguments->DeviceAddress(), &record.threadGroup), "Vulkan dispatch: thread-dimension indirect arguments need the argument kernel");
-            const VkBufferCopy limit{12, limitByte, 12};
-            if (readsLimit) context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, threadArguments->Handle(), data, 1, &limit);
+            const VkBufferCopy limit{12, data.offset + limitByte, 12};
+            if (readsLimit) context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, threadArguments->Handle(), data.buffer, 1, &limit);
         } else if (readsLimit) {
-            context.Resolved(&Graphics::DeviceFunctions::cmdUpdateBuffer, "vkCmdUpdateBuffer")(commands, data, limitByte, sizeof(record.threadLimit), record.threadLimit.data());
+            context.Resolved(&Graphics::DeviceFunctions::cmdUpdateBuffer, "vkCmdUpdateBuffer")(commands, data.buffer, data.offset + limitByte, sizeof(record.threadLimit), record.threadLimit.data());
         }
         if (readsLimit) resources.forgetShaderDataWords(*record.shader);
         covered = 0;

@@ -1,0 +1,5 @@
+# libSceAgcDriver
+
+## add the sealed command stream's replay correctness
+
+- [Replayed batches render broken](../../../core/libs/prx/libSceAgcDriver/Graphics/src/SealedBatch.cpp) (libSceAgcDriver) - a batch recorded into a sealed command stream and replayed into a command buffer at submit (`APS5_SEALED_STREAM`) renders torn geometry, smeared textures and sky and water artifacts in Bandicoot, while the same scene with direct command buffers is correct; the stream therefore stays off by default. The replayed sequence is a byte copy of the recorded `{run, payload}` records, so the suspects are a command whose arguments the thunk copies incompletely (push descriptors first), a record lost or reordered across a chunk or a byte-cap demotion, a raw command reaching a stream handle, or a replay that skips the inline path's synchronization. Bisect with `APS5_NO_STREAMED_PUSH_DESCRIPTORS`, `APS5_NO_BATCH_TABLE` and `APS5_NO_COMMAND_THUNKS`. Closes when: a title renders identically with `APS5_SEALED_STREAM` set and without it.

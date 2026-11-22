@@ -1388,7 +1388,8 @@ struct Recorder::ProgressWatcher {
 };
 
 Recorder::Recorder(const Context& context, bool timelineSemaphores, bool deferredBatches, std::uint32_t queueFamily) : context(context), id(nextRecorderId.fetch_add(1)), queueFamily(queueFamily) {
-    if (deferredBatches && context.deviceProc != nullptr) {
+    static const bool sealedStream = std::getenv("APS5_SEALED_STREAM") != nullptr;
+    if (deferredBatches && sealedStream && context.deviceProc != nullptr) {
         ResolveCommandFunctions(realCommands, context.device, context.deviceProc);
         executor = makeExecutor();
         deferring = true;

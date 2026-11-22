@@ -168,6 +168,8 @@ struct PreparedShaderState {
     };
     std::vector<Entry> entries;
     std::vector<UserDataLink> userDataLinks;
+    struct GraphicsUserDataTailCache;
+    std::shared_ptr<GraphicsUserDataTailCache> graphicsUserDataTails;
     std::vector<std::vector<std::uint64_t>> registeredAbis;
     std::vector<GraphicsAbi> graphicsAbis;
     std::vector<Rectangle> rectangles;

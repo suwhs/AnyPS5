@@ -6,12 +6,14 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
+#include "ThreadOwned.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <span>
 
@@ -140,12 +142,14 @@ void Driver::tagVariantRuns(DispatchVariant& variant, std::span<const ShaderReco
     variant.userWordsWalked = use.asBase | use.asValue;
     std::uint64_t relocatable = eligible && drawRelocationEnabled() ? use.asBase & ~use.asValue : 0;
     if (hiddenWords != 0) relocatable &= hiddenWords >= 64 ? 0 : ~((std::uint64_t {1} << hiddenWords) - 1);
-    std::vector<std::pair<std::uint64_t, std::int32_t>> reads;
+    std::vector<std::pair<std::uint64_t, std::int32_t>>* readsSlot = nullptr;
+    auto& reads = ShaderRecompiler::ThreadOwned(readsSlot);
+    reads.clear();
     const auto covered = [&](std::uint64_t address) {
         return std::any_of(regions.begin(), regions.end(), [&](const ShaderRecompiler::MemoryRegion& region) { return address >= region.guestAddress && address - region.guestAddress + sizeof(std::uint32_t) <= region.bytes.size(); });
     };
     if (relocatable != 0) {
-        reads = use.reads;
+        reads.assign(use.reads.begin(), use.reads.end());
         std::sort(reads.begin(), reads.end());
         reads.erase(std::unique(reads.begin(), reads.end()), reads.end());
         const auto drop = [&](std::int32_t origin) {
@@ -160,6 +164,10 @@ void Driver::tagVariantRuns(DispatchVariant& variant, std::span<const ShaderReco
         }
     }
     variant.relocatableWords = relocatable;
+    variant.words.reserve(variant.words.size() + std::accumulate(regions.begin(), regions.end(), std::size_t {0}, [](std::size_t total, const ShaderRecompiler::MemoryRegion& region) { return total + region.bytes.size() / sizeof(std::uint32_t); }));
+    variant.runs.reserve(variant.runs.size() + regions.size());
+    variant.runBases.reserve(variant.runs.capacity());
+    variant.shared.reserve(variant.runs.capacity());
     for (std::size_t index = 0; index < regions.size(); ++index) {
         const auto& region = regions[index];
         const auto count = region.bytes.size() / sizeof(std::uint32_t);

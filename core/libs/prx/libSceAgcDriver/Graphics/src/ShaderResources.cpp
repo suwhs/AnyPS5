@@ -2599,6 +2599,7 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                 Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, binding.count, flags, nullptr}, {}};
                 if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
                     Require(binding.guestDescriptor.size() == static_cast<std::uint64_t>(binding.count) * 4, "guest buffer descriptor must contain four DWORDs per array element");
+                    item.allocations.reserve(binding.count);
                     for (std::uint32_t element = 0; element < binding.count; ++element) {
                         // An element the recompiler did not classify (a producer without the
                         // vector) counts as written, like imageWritten below.
@@ -2698,6 +2699,10 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
         splitSets = SplitsSets(context, shaders);
         std::array<std::vector<VkDescriptorSetLayoutBinding>, 2> descriptions;
         bool tablesUpdateAfterBind = false;
+        descriptions[0].reserve(bindings.size());
+        descriptions[1].reserve(bindings.size());
+        layoutBindingFlags.reserve(bindings.size());
+        fragmentBindingFlags.reserve(bindings.size());
         for (const auto& binding : bindings) {
             const auto set = setOf(binding);
             descriptions[set].push_back(binding.layout);
@@ -2843,6 +2848,12 @@ DescribedSetLayouts DescribeSetLayouts(const Context& context, std::span<const C
     bool updateAfterBind = false;
     bool tablesUpdateAfterBind = false;
     std::uint64_t storageBuffers = 0;
+    std::size_t plannedBindings = 0;
+    for (const auto& shader : shaders) {
+        if (shader.program != nullptr) plannedBindings += shader.program->bindings.size();
+    }
+    for (auto& description : descriptions) description.reserve(plannedBindings);
+    for (auto& flags : bindingFlags) flags.reserve(plannedBindings);
     for (const auto& shader : shaders) {
         Require(shader.program != nullptr, "missing compiled shader");
         const VkShaderStageFlags flags = VulkanStage(shader.stage);

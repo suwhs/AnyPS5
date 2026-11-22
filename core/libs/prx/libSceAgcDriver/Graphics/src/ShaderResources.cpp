@@ -1110,7 +1110,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 throw std::runtime_error(text);
             }
             static const bool traceKeys = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
-            if (traceKeys) std::fprintf(stderr, "[dcc-keys] sampled 0x%llx through keys 0x%llx reads the %s fill, not the pending image\n", static_cast<unsigned long long>(address), static_cast<unsigned long long>(resource.dccAddress), DccKeysName(*keys));
+            if (traceKeys && TraceDccKeyLine()) std::fprintf(stderr, "[dcc-keys] sampled 0x%llx through keys 0x%llx reads the %s fill, not the pending image\n", static_cast<unsigned long long>(address), static_cast<unsigned long long>(resource.dccAddress), DccKeysName(*keys));
             source.reset();
             clearThroughKeys = true;
         }

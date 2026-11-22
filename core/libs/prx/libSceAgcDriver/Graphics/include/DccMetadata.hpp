@@ -6,14 +6,25 @@
 #endif
 #include <vulkan/vulkan.h>
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <span>
 
 namespace AgcDriver::Graphics {
 
 struct Context;
+
+inline bool TraceDccKeyLine() {
+    constexpr std::uint64_t limit = 64;
+    static std::atomic<std::uint64_t> lines{0};
+    const auto count = lines.fetch_add(1, std::memory_order_relaxed);
+    if (count < limit) return true;
+    if (count == limit) std::fprintf(stderr, "[dcc-keys] trace capped at %llu lines; the [dcc] line reports the totals\n", static_cast<unsigned long long>(limit));
+    return false;
+}
 
 // Delta color compression keeps one key byte per 256 bytes of a color surface. Surfaces are written
 // uncompressed here, so the keys that matter are the fast-clear codes a title writes into the metadata

@@ -118,7 +118,7 @@ std::array<std::uint32_t, 2> displayableKeyPixel(const DisplayBuffer& buffer, st
 
 void traceDisplayKeys(const DisplayBuffer& buffer, const std::uint8_t* keys, std::size_t count) {
     static const bool trace = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
-    if (!trace) return;
+    if (!trace || !Graphics::TraceDccKeyLine()) return;
     constexpr std::size_t MaxRuns = 256;
     std::string runs;
     std::size_t begin = 0;

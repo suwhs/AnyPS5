@@ -369,7 +369,7 @@ void Driver::storeBufferFill(std::uint32_t queueId, std::uint64_t base, std::siz
     phase(FillClassify);
 
     static const bool traceKeys = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
-    if (traceKeys && coverage.cover == Graphics::StorageTexture::FillCover::Keys) std::fprintf(stderr, "[dcc-keys] title fills keys 0x%llx+0x%zx with %08x %08x %08x %08x (queue 0x%x)\n", static_cast<unsigned long long>(base), bytes, pattern[0], pattern[1], pattern[2], pattern[3], queueId);
+    if (traceKeys && coverage.cover == Graphics::StorageTexture::FillCover::Keys && Graphics::TraceDccKeyLine()) std::fprintf(stderr, "[dcc-keys] title fills keys 0x%llx+0x%zx with %08x %08x %08x %08x (queue 0x%x)\n", static_cast<unsigned long long>(base), bytes, pattern[0], pattern[1], pattern[2], pattern[3], queueId);
     const bool uniformKeysFill = coverage.cover == Graphics::StorageTexture::FillCover::Keys && IsByteFill(pattern);
     if (uniformKeysFill) {
         Graphics::StorageTexture::NoteKeysFill(base, bytes, static_cast<std::uint8_t>(pattern[0]));

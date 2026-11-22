@@ -2914,7 +2914,7 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
     static const bool keyFlipDrop = std::getenv("APS5_KEYFLIP_DROP") != nullptr;
     static const bool traceKeys = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
     const bool keyFlip = keysChanged && blockUnits && !keyFlipDrop && (IsDccClear(uploadedKeys) || uploadedKeys == DccKeys::ClearSingle) && keys == DccKeys::Uncompressed && stampedBlocks.size() >= trackedLayers;
-    if (traceKeys && keysChanged) {
+    if (traceKeys && keysChanged && TraceDccKeyLine()) {
         std::size_t pendingUnits = 0, stampedUnits = 0;
         for (std::uint32_t unit = 0; unit < trackedLayers; ++unit) {
             if (layerPending[unit]) ++pendingUnits;
@@ -3145,7 +3145,7 @@ namespace {
 // 2's tracer): the write-back path, the surface and its key range.
 void traceKeyStore(const char* path, const GuestTextureResource& descriptor, std::uint64_t guestBytes) {
     static const bool trace = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
-    if (!trace || descriptor.dccAddress == 0) return;
+    if (!trace || descriptor.dccAddress == 0 || !TraceDccKeyLine()) return;
     const auto packet = GuestMemory::CurrentPacket();
     std::fprintf(stderr, "[dcc-keys] uncompressed store by %s (%s) for surface 0x%llx+0x%llx: keys 0x%llx+0x%llx (packet 0x%x queue 0x%x)\n", path, flushReason != nullptr ? flushReason : "?", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), static_cast<unsigned long long>(descriptor.dccAddress), static_cast<unsigned long long>(DccKeyCount(descriptor, guestBytes)), packet.opcode, packet.queue);
 }
@@ -7058,7 +7058,7 @@ std::size_t StorageTexture::NoteKeysFill(std::uint64_t address, std::size_t byte
         if (!texture->keysFillMatches(address, bytes, overlapped)) continue;
         texture->filledKeys = keys;
         ++covered;
-        if (traceKeys && IsDccClear(keys)) std::fprintf(stderr, "[dcc-keys] %s key fill over 0x%llx+0x%llx (uploaded %s, dirty %d)\n", DccKeysName(keys), static_cast<unsigned long long>(texture->descriptor.baseAddress), static_cast<unsigned long long>(texture->guestBytes), DccKeysName(texture->uploadedKeys), texture->dirty ? 1 : 0);
+        if (traceKeys && IsDccClear(keys) && TraceDccKeyLine()) std::fprintf(stderr, "[dcc-keys] %s key fill over 0x%llx+0x%llx (uploaded %s, dirty %d)\n", DccKeysName(keys), static_cast<unsigned long long>(texture->descriptor.baseAddress), static_cast<unsigned long long>(texture->guestBytes), DccKeysName(texture->uploadedKeys), texture->dirty ? 1 : 0);
         if (refillDisabled || !IsDccClear(keys) || texture->uploadedKeys != keys) continue;
         texture->uploadedKeys = DccKeys::Uncompressed;
     }
@@ -7155,7 +7155,7 @@ bool StorageTexture::clearByKeysFill(DccKeys keys, std::uint8_t key) {
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) layerGeneration[layer] = collectedLayerGeneration(layer, now);
     refreshGeneration();
     ++version;
-    if (traceKeys) std::fprintf(stderr, "[dcc-keys] key fill %s clears 0x%llx+0x%llx at once (keys 0x%llx, %zu pending units dropped, dirty %d)\n", DccKeysName(keys), static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), static_cast<unsigned long long>(descriptor.dccAddress), droppedUnits, wasDirty ? 1 : 0);
+    if (traceKeys && TraceDccKeyLine()) std::fprintf(stderr, "[dcc-keys] key fill %s clears 0x%llx+0x%llx at once (keys 0x%llx, %zu pending units dropped, dirty %d)\n", DccKeysName(keys), static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), static_cast<unsigned long long>(descriptor.dccAddress), droppedUnits, wasDirty ? 1 : 0);
     return true;
 }
 

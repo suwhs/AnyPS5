@@ -20,6 +20,7 @@ enum class ColorTileMode : std::uint32_t {
     S4KBX = 0x15,
     D4KBX = 0x16,
     Z64KBX = 0x18,
+    S64KBX = 0x19,
     D64KBX = 0x1a,
     RenderTarget = 0x1b,
     GcnThin1D = 0x100,
@@ -38,7 +39,7 @@ constexpr bool ColorTileModeIsLinear(ColorTileMode mode) {
 }
 
 constexpr bool ColorTileModeIsXor(ColorTileMode mode) {
-    return mode == ColorTileMode::S4KBX || mode == ColorTileMode::D4KBX || mode == ColorTileMode::Z64KBX || mode == ColorTileMode::D64KBX || mode == ColorTileMode::RenderTarget;
+    return mode == ColorTileMode::S4KBX || mode == ColorTileMode::D4KBX || mode == ColorTileMode::Z64KBX || mode == ColorTileMode::S64KBX || mode == ColorTileMode::D64KBX || mode == ColorTileMode::RenderTarget;
 }
 
 constexpr std::uint32_t ColorTileModeBlockBytes(ColorTileMode mode) {
@@ -50,7 +51,7 @@ constexpr TextureTileMode ColorTextureTileMode(ColorTileMode mode) {
     if (mode == ColorTileMode::GcnDisplay1D) return TextureTileMode::kGcnDisplay1D;
     if (mode == ColorTileMode::GcnDisplay2D) return TextureTileMode::kGcnDisplay2D;
     if (mode == ColorTileMode::GcnThin2D) return TextureTileMode::kGcnThin2D;
-    return ColorTileModeIsLinear(mode) ? TextureTileMode::kLinear : mode == ColorTileMode::Standard4KB ? TextureTileMode::kStandard4KB : mode == ColorTileMode::Standard64KB ? TextureTileMode::kStandard64KB : mode == ColorTileMode::S4KBX ? TextureTileMode::kS4KBX : mode == ColorTileMode::D4KBX ? TextureTileMode::kD4KBX : mode == ColorTileMode::D64KBX ? TextureTileMode::kD64KBX : mode == ColorTileMode::Z64KBX ? TextureTileMode::kZ64KBX : TextureTileMode::kR64KBX;
+    return ColorTileModeIsLinear(mode) ? TextureTileMode::kLinear : mode == ColorTileMode::Standard4KB ? TextureTileMode::kStandard4KB : mode == ColorTileMode::Standard64KB ? TextureTileMode::kStandard64KB : mode == ColorTileMode::S4KBX ? TextureTileMode::kS4KBX : mode == ColorTileMode::D4KBX ? TextureTileMode::kD4KBX : mode == ColorTileMode::D64KBX ? TextureTileMode::kD64KBX : mode == ColorTileMode::Z64KBX ? TextureTileMode::kZ64KBX : mode == ColorTileMode::S64KBX ? TextureTileMode::kS64KBX : TextureTileMode::kR64KBX;
 }
 
 ColorTileMode DecodeColorTileMode(std::uint32_t attrib3);

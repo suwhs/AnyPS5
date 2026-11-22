@@ -1799,8 +1799,8 @@ ParkedHostImports& Parked() {
 }
 
 bool ParkEnabled() {
-    static const bool enabled = std::getenv("APS5_IMPORT_PARK") != nullptr;
-    return enabled;
+    static const bool disabled = std::getenv("APS5_NO_IMPORT_PARK") != nullptr;
+    return !disabled;
 }
 
 std::uint64_t ParkLimit() {

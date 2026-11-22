@@ -1432,7 +1432,18 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
         auto commit = [this, contentKey = std::move(contentKey), localDevice = std::move(localDevice), decode = std::move(decode), drawParameters, stages = std::move(stages), snapshots = std::move(snapshots), recipe = std::move(recipe), recipeStages = std::move(recipeStages), drawKey, recipeDonor, shape = tail.shapeKey, commitQueue, commitPacket, epoch, trace = trace, writablePrograms = std::move(writablePrograms), results = std::move(results), memory = std::move(memory), linked = std::move(linked), stageCaptures = std::move(stageCaptures), matched = std::move(matched), matchedRegions = std::move(matchedRegions), fresh = std::move(fresh), decodeReads = std::move(decodeReads), shaderMemory = std::move(shaderMemory), entry = std::move(entry), dataEntry = std::move(dataEntry), compiledStages = std::move(compiledStages), stageData = std::move(stageData), preparedStageA = std::move(preparedStageA)]() mutable {
             DrawPipeline::FollowEpoch(epoch);
             GuestMemory::SetCurrentPacket(commitPacket, commitQueue);
-            if (preparedStageA != nullptr) preparedStageA->Wait();
+            if (preparedStageA != nullptr) {
+                static const bool statStageA = std::getenv("APS5_STAT_DRAW_LOOKUP") != nullptr;
+                const auto stageAStart = statStageA ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                preparedStageA->Wait();
+                if (statStageA) {
+                    static std::atomic<std::uint64_t> stageAWaits{0}, stageANs{0};
+                    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stageAStart).count();
+                    const auto waits = stageAWaits.fetch_add(1, std::memory_order_relaxed) + 1;
+                    stageANs.fetch_add(ns, std::memory_order_relaxed);
+                    if (waits % 200000u == 0u) std::fprintf(stderr, "[commit-draw] stage-a waits=%llu wait=%.0fns%c", static_cast<unsigned long long>(waits), static_cast<double>(stageANs.load()) / waits, 10);
+                }
+            }
             commitDraw(localDevice, commitQueue, decode->state, drawParameters, stages, snapshots, recipe, recipeStages, drawKey, recipeDonor, trace, shape, contentKey.empty() ? nullptr : &contentKey, preparedStageA.get());
         };
         auto held = std::make_shared<decltype(commit)>(std::move(commit));
@@ -1544,7 +1555,10 @@ void Driver::restartFinishedDraw(DrawTail& tail) {
 void Driver::commitDraw(std::shared_ptr<VulkanDevice> localDevice, std::uint32_t queue, const Graphics::State& graphics, const Pm4::DrawParameters& drawParameters, std::span<const Graphics::CompiledShader> stages, std::span<const Graphics::GuestMemorySnapshot> snapshots, const std::shared_ptr<const DrawRecipe>& recipe, const std::vector<std::shared_ptr<DispatchVariant>>& recipeStages, std::uint64_t drawKey, const std::shared_ptr<DrawEntry>& recipeDonor, VulkanDevice::DrawTraceContext trace, std::uint64_t shape, const std::vector<std::uint32_t>* contentKey, Graphics::PreparedStageA* prepared) {
     const auto* tracePtr = trace.token != 0 ? &trace : nullptr;
     GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Draw);
+    static const bool statCommit = std::getenv("APS5_STAT_DRAW_LOOKUP") != nullptr;
+    const auto lockWaitStart = statCommit ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     std::lock_guard gpuLock(GuestMemory::GpuMutex());
+    const auto lockGot = statCommit ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (auto current = device.Load(); current != nullptr && current != localDevice) localDevice = std::move(current);
     struct SubmitDue {
         Driver& driver;
@@ -1555,6 +1569,7 @@ void Driver::commitDraw(std::shared_ptr<VulkanDevice> localDevice, std::uint32_t
     } submitDue{*this, localDevice};
     recordLabelsForPacket(localDevice.get(), queue);
     noteDrawWriters(stages, queue);
+    const auto drawStart = statCommit ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (recipe != nullptr) {
         if (localDevice->DrawFromRecipe(graphics, drawParameters, stages, snapshots, recipe, tracePtr) == RecipeOutcome::Recorded) return;
         VulkanDevice::NoteRecipe(VulkanDevice::RecipeEvent::Restart, VulkanDevice::RecipeKind::Draw);
@@ -1562,6 +1577,18 @@ void Driver::commitDraw(std::shared_ptr<VulkanDevice> localDevice, std::uint32_t
     std::shared_ptr<const DrawRecipe> built;
     localDevice->Draw(graphics, drawParameters, stages, snapshots, recipeStages.empty() ? nullptr : &built, tracePtr, shape, contentKey, prepared);
     if (built != nullptr) attachDrawRecipe(drawKey, recipeStages, std::move(built), recipeDonor);
+    if (statCommit) {
+        static std::atomic<std::uint64_t> commitCalls{0}, commitLockNs{0}, commitDrawNs{0}, commitRestNs{0};
+        const auto end = std::chrono::steady_clock::now();
+        const auto commits = commitCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto lockNs = std::chrono::duration_cast<std::chrono::nanoseconds>(lockGot - lockWaitStart).count();
+        const auto drawNs = std::chrono::duration_cast<std::chrono::nanoseconds>(end - drawStart).count();
+        const auto totalNs = std::chrono::duration_cast<std::chrono::nanoseconds>(end - lockWaitStart).count();
+        commitLockNs.fetch_add(lockNs, std::memory_order_relaxed);
+        commitDrawNs.fetch_add(drawNs, std::memory_order_relaxed);
+        commitRestNs.fetch_add(totalNs - lockNs - drawNs, std::memory_order_relaxed);
+        if (commits % 200000u == 0u) std::fprintf(stderr, "[commit-draw] calls=%llu lock-wait=%.0fns draw=%.0fns rest=%.0fns total=%.0fns%c", static_cast<unsigned long long>(commits), static_cast<double>(commitLockNs.load()) / commits, static_cast<double>(commitDrawNs.load()) / commits, static_cast<double>(commitRestNs.load()) / commits, static_cast<double>((commitLockNs.load() + commitDrawNs.load() + commitRestNs.load()) / commits), 10);
+    }
 }
 
 }

@@ -1557,7 +1557,23 @@ void APS5_VABI scePthreadYield() {
     Sleep(1);
     lastTsc = __rdtsc();
 #else
+    static const bool backoff = std::getenv("APS5_YIELD_BACKOFF") != nullptr && std::getenv("APS5_NO_YIELD_BACKOFF") == nullptr;
+    if (!backoff) {
+        std::this_thread::yield();
+        return;
+    }
+    thread_local unsigned int spins = 0;
+    thread_local std::uint64_t windowStart = 0;
+    const std::uint64_t now = TimedWait::NowNanos();
+    if (now - windowStart > 1000000ULL) {
+        windowStart = now;
+        spins = 0;
+    }
     std::this_thread::yield();
+    if (++spins < 256) return;
+    spins = 0;
+    windowStart = TimedWait::NowNanos();
+    TimedWait::SleepNanos(1000000ULL);
 #endif
 }
 

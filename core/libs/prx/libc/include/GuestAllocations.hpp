@@ -64,7 +64,7 @@ void GuestAllocationsUnregisterImage_nid_postfix(void* mutation, const void* ima
 void GuestAllocationsEnd_nid_postfix(void* mutation) noexcept;
 void GuestAllocationsAdd_nid_postfix(void* mutation, void* pointer, std::size_t bytes, bool readable, bool writable, bool gpu);
 void GuestAllocationsAddGpu_nid_no_patch(void* mutation, void* pointer, std::size_t bytes, bool readable, bool writable, bool gpu, bool gpuWritable);
-void GuestAllocationsRequireUnpinned_nid_postfix(void* mutation, const void* pointer, std::size_t bytes);
+void GuestAllocationsRequireUnpinned_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, bool remapping = true);
 void GuestAllocationsRequireAvailable_nid_postfix(void* mutation, const void* pointer, std::size_t bytes);
 bool GuestAllocationsCovers_nid_postfix(void* mutation, const void* pointer, std::size_t bytes);
 void GuestAllocationsTrimToRegistered_nid_postfix(void* mutation, std::size_t page, const void** pointer, std::size_t* bytes);
@@ -93,7 +93,7 @@ void GuestAllocationsInvalidate_nid_postfix(std::uintptr_t address, std::size_t 
 // and finishes the GPU work that holds leases; it returns whether it finished any (a round that found
 // nothing to wait for counts against the same bound as a plain spin). Without one the mutation spins
 // until the lease is dropped by another thread.
-void GuestAllocationsSetPinWaiter_nid_postfix(bool (*callback)(std::uintptr_t address, std::size_t bytes));
+void GuestAllocationsSetPinWaiter_nid_postfix(bool (*callback)(std::uintptr_t address, std::size_t bytes, bool remapping));
 void GuestAllocationsSetGpuMapObserver_nid_postfix(void (*callback)(const Mapped& ranges, std::uint64_t generation));
 void GuestAllocationsSetUnmapObserver_nid_postfix(void (*callback)(std::uintptr_t address, std::size_t bytes));
 bool GuestAllocationsUnmapObservedForTest_nid_postfix();
@@ -111,7 +111,7 @@ public:
     void UnregisterImage(const void* image) { GuestAllocationsUnregisterImage_nid_postfix(handle, image); }
     void Add(void* pointer, std::size_t bytes, bool readable, bool writable, bool gpu) { GuestAllocationsAdd_nid_postfix(handle, pointer, bytes, readable, writable, gpu); }
     void Add(void* pointer, std::size_t bytes, bool readable, bool writable, bool gpu, bool gpuWritable) { GuestAllocationsAddGpu_nid_no_patch(handle, pointer, bytes, readable, writable, gpu, gpuWritable); }
-    void RequireUnpinned(const void* pointer, std::size_t bytes) const { GuestAllocationsRequireUnpinned_nid_postfix(handle, pointer, bytes); }
+    void RequireUnpinned(const void* pointer, std::size_t bytes, bool remapping = true) const { GuestAllocationsRequireUnpinned_nid_postfix(handle, pointer, bytes, remapping); }
     void RequireAvailable(const void* pointer, std::size_t bytes) const { GuestAllocationsRequireAvailable_nid_postfix(handle, pointer, bytes); }
     bool Covers(const void* pointer, std::size_t bytes) const { return GuestAllocationsCovers_nid_postfix(handle, pointer, bytes); }
     void TrimToRegistered(std::size_t page, const void*& pointer, std::size_t& bytes) const { GuestAllocationsTrimToRegistered_nid_postfix(handle, page, &pointer, &bytes); }

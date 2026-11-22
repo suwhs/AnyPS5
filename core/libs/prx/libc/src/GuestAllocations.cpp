@@ -95,7 +95,7 @@ bool isRetiring(const Range& range) {
 
 std::atomic<std::uint64_t> generation{1};
 std::atomic<void (*)(std::uintptr_t, std::size_t)> invalidator{nullptr};
-std::atomic<bool (*)(std::uintptr_t, std::size_t)> pinWaiter{nullptr};
+std::atomic<bool (*)(std::uintptr_t, std::size_t, bool)> pinWaiter{nullptr};
 std::atomic<void (*)(const Mapped&, std::uint64_t)> gpuMapObserver{nullptr};
 std::atomic<void (*)(std::uintptr_t, std::size_t)> unmapObserver{nullptr};
 std::atomic<std::uint32_t> gpuMapObserverCalls{0};
@@ -234,7 +234,7 @@ void GuestAllocationsNoteGpuMapping_nid_postfix(void* mutation, const void* poin
     if (mutation != nullptr && bytes != 0) static_cast<MutationState*>(mutation)->gpuMapped.emplace_back(reinterpret_cast<std::uintptr_t>(pointer), bytes);
 }
 
-void GuestAllocationsSetPinWaiter_nid_postfix(bool (*callback)(std::uintptr_t, std::size_t)) {
+void GuestAllocationsSetPinWaiter_nid_postfix(bool (*callback)(std::uintptr_t, std::size_t, bool)) {
     pinWaiter.store(callback, std::memory_order_release);
 }
 
@@ -447,7 +447,7 @@ void GuestAllocationsAdd_nid_postfix(void* mutation, void* pointer, std::size_t 
     throw std::runtime_error(message);
 }
 
-void GuestAllocationsRequireUnpinned_nid_postfix(void* mutation, const void* pointer, std::size_t bytes) {
+void GuestAllocationsRequireUnpinned_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, bool remapping) {
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "guest allocation range overflow");
     const auto end = address + bytes;
@@ -504,7 +504,7 @@ void GuestAllocationsRequireUnpinned_nid_postfix(void* mutation, const void* poi
         if (state != nullptr && state->lock.owns_lock()) {
             state->lock.unlock();
             try {
-                if (waiter != nullptr) progressed = waiter(address, bytes);
+                if (waiter != nullptr) progressed = waiter(address, bytes, remapping);
                 else std::this_thread::yield();
             } catch (...) {
                 state->lock.lock();

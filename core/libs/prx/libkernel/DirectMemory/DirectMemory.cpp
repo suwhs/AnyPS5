@@ -1791,7 +1791,7 @@ int DoMprotect(const void* addr, size_t len, int prot, bool requireMappedStart) 
     std::vector<std::pair<const void*, std::size_t>> spans;
     mutation.ForRegistered(pointer, bytes, [&](const void* span, std::size_t spanBytes) { spans.emplace_back(span, spanBytes); });
     if (requireMappedStart && (spans.empty() || spans.front().first != pointer)) return SCE_KERNEL_ERROR_EINVAL;
-    for (const auto& [span, spanBytes] : spans) mutation.RequireUnpinned(span, spanBytes);
+    for (const auto& [span, spanBytes] : spans) mutation.RequireUnpinned(span, spanBytes, false);
     for (const auto& [span, spanBytes] : spans) {
         mutation.Protect(span, spanBytes, (prot & 3) != 0, (prot & 2) != 0, (prot & GuestProtGpuReadWrite) != 0, (prot & GuestProtGpuWrite) != 0, [&] {
 #ifdef __APPLE__

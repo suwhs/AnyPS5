@@ -374,11 +374,6 @@ public:
     // the commit; the draw completes it (stage B) under the mutex, or builds inline when the slot's
     // staging flag does not match.
     void Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, std::shared_ptr<const DrawRecipe>* recipe = nullptr, const DrawTraceContext* trace = nullptr, std::uint64_t shape = 0, const std::vector<std::uint32_t>* contentKey = nullptr, Graphics::PreparedStageA* prepared = nullptr);
-    // Stage A of a direct draw's resource build, run WITHOUT GuestMemory::GpuMutex on a pool worker
-    // before the commit (the dispatch counterpart of PrepareDispatch). Null when the pool is off
-    // (APS5_PREPARE_WORKERS), no worker has headroom or the commit's resource cache may serve the
-    // draw (the wasted stage A is simply dropped). `graphics`, `shaders` and the snapshots' backing
-    // must outlive the commit.
     std::shared_ptr<Graphics::PreparedStageA> PrepareDrawStageA(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots, const std::vector<std::uint32_t>& contentKey);
     std::vector<std::uint32_t> DrawContentKey(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders) const;
     bool DrawInputsInPlace() const;

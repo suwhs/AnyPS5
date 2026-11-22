@@ -43,11 +43,6 @@ struct DrawTraceContext {
 // The dispatcher's state, draw, shaders and snapshots are the same objects the commit consumes, so
 // only that flag can differ.
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots = {}, std::shared_ptr<const DrawRecipe>* recipe = nullptr, const DrawTraceContext* trace = nullptr, std::uint64_t shape = 0, const std::vector<std::uint32_t>* contentKey = nullptr, PreparedStageA* prepared = nullptr);
-// Dispatches stage A of the draw's resource build to the prepare pool (APS5_PREPARE_WORKERS), the
-// caller keeping the state, shaders and snapshots alive through the consume. The staging flag is
-// derived from the draw-staging switches alone, so a slot whose consumer would not be recordable is
-// dropped at the consume and the commit builds inline. Returns null when the pool is off, the draw
-// cannot be pooled or no worker has headroom.
 std::shared_ptr<PreparedStageA> PrepareDrawStageA(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, const std::vector<std::uint32_t>& contentKey);
 std::vector<std::uint32_t> DrawResourceContentKey(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders);
 

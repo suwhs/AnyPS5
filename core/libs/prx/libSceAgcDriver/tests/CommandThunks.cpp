@@ -1058,9 +1058,134 @@ struct Exact<CommandId::CmdPushDescriptorSetKHR> {
     }
 };
 
+#define APS5_EXACT_1(name, T1, a1) \
+    template<> \
+    struct Exact<CommandId::name> { \
+        static VKAPI_ATTR void VKAPI_CALL Run(VkCommandBuffer commands, T1 a1) { putTag(#name); put(commands); put(a1); } \
+    };
+#define APS5_EXACT_2(name, T1, a1, T2, a2) \
+    template<> \
+    struct Exact<CommandId::name> { \
+        static VKAPI_ATTR void VKAPI_CALL Run(VkCommandBuffer commands, T1 a1, T2 a2) { putTag(#name); put(commands); put(a1); put(a2); } \
+    };
+#define APS5_EXACT_3(name, T1, a1, T2, a2, T3, a3) \
+    template<> \
+    struct Exact<CommandId::name> { \
+        static VKAPI_ATTR void VKAPI_CALL Run(VkCommandBuffer commands, T1 a1, T2 a2, T3 a3) { putTag(#name); put(commands); put(a1); put(a2); put(a3); } \
+    };
+#define APS5_EXACT_4(name, T1, a1, T2, a2, T3, a3, T4, a4) \
+    template<> \
+    struct Exact<CommandId::name> { \
+        static VKAPI_ATTR void VKAPI_CALL Run(VkCommandBuffer commands, T1 a1, T2 a2, T3 a3, T4 a4) { putTag(#name); put(commands); put(a1); put(a2); put(a3); put(a4); } \
+    };
+#define APS5_EXACT_5(name, T1, a1, T2, a2, T3, a3, T4, a4, T5, a5) \
+    template<> \
+    struct Exact<CommandId::name> { \
+        static VKAPI_ATTR void VKAPI_CALL Run(VkCommandBuffer commands, T1 a1, T2 a2, T3 a3, T4 a4, T5 a5) { putTag(#name); put(commands); put(a1); put(a2); put(a3); put(a4); put(a5); } \
+    };
+#define APS5_EXACT_0(name) \
+    template<> \
+    struct Exact<CommandId::name> { \
+        static VKAPI_ATTR void VKAPI_CALL Run(VkCommandBuffer commands) { putTag(#name); put(commands); } \
+    };
+#define APS5_EXACT_6(name, T1, a1, T2, a2, T3, a3, T4, a4, T5, a5, T6, a6) \
+    template<> \
+    struct Exact<CommandId::name> { \
+        static VKAPI_ATTR void VKAPI_CALL Run(VkCommandBuffer commands, T1 a1, T2 a2, T3 a3, T4 a4, T5 a5, T6 a6) { putTag(#name); put(commands); put(a1); put(a2); put(a3); put(a4); put(a5); put(a6); } \
+    };
+#define APS5_EXACT_7(name, T1, a1, T2, a2, T3, a3, T4, a4, T5, a5, T6, a6, T7, a7) \
+    template<> \
+    struct Exact<CommandId::name> { \
+        static VKAPI_ATTR void VKAPI_CALL Run(VkCommandBuffer commands, T1 a1, T2 a2, T3 a3, T4 a4, T5 a5, T6 a6, T7 a7) { putTag(#name); put(commands); put(a1); put(a2); put(a3); put(a4); put(a5); put(a6); put(a7); } \
+    };
+#define APS5_EXACT_8(name, T1, a1, T2, a2, T3, a3, T4, a4, T5, a5, T6, a6, T7, a7, T8, a8) \
+    template<> \
+    struct Exact<CommandId::name> { \
+        static VKAPI_ATTR void VKAPI_CALL Run(VkCommandBuffer commands, T1 a1, T2 a2, T3 a3, T4 a4, T5 a5, T6 a6, T7 a7, T8 a8) { putTag(#name); put(commands); put(a1); put(a2); put(a3); put(a4); put(a5); put(a6); put(a7); put(a8); } \
+    };
+APS5_EXACT_3(CmdBindIndexBuffer, VkBuffer, buffer, VkDeviceSize, offset, VkIndexType, indexType)
+APS5_EXACT_2(CmdBindPipeline, VkPipelineBindPoint, point, VkPipeline, pipeline)
+APS5_EXACT_4(CmdDraw, std::uint32_t, vertexCount, std::uint32_t, instanceCount, std::uint32_t, firstVertex, std::uint32_t, firstInstance)
+APS5_EXACT_5(CmdDrawIndexed, std::uint32_t, indexCount, std::uint32_t, instanceCount, std::uint32_t, firstIndex, std::int32_t, vertexOffset, std::uint32_t, firstInstance)
+APS5_EXACT_4(CmdDrawIndirect, VkBuffer, buffer, VkDeviceSize, offset, std::uint32_t, drawCount, std::uint32_t, stride)
+APS5_EXACT_4(CmdDrawIndexedIndirect, VkBuffer, buffer, VkDeviceSize, offset, std::uint32_t, drawCount, std::uint32_t, stride)
+APS5_EXACT_1(CmdSetCullModeEXT, VkCullModeFlags, mode)
+APS5_EXACT_3(CmdSetDepthBias, float, constant, float, clamp, float, slope)
+APS5_EXACT_1(CmdSetDepthBiasEnableEXT, VkBool32, enable)
+APS5_EXACT_2(CmdSetDepthBounds, float, minimum, float, maximum)
+APS5_EXACT_1(CmdSetDepthBoundsTestEnableEXT, VkBool32, enable)
+APS5_EXACT_1(CmdSetDepthCompareOpEXT, VkCompareOp, compare)
+APS5_EXACT_1(CmdSetDepthTestEnableEXT, VkBool32, enable)
+APS5_EXACT_1(CmdSetDepthWriteEnableEXT, VkBool32, enable)
+APS5_EXACT_1(CmdSetFrontFaceEXT, VkFrontFace, face)
+APS5_EXACT_2(CmdSetStencilCompareMask, VkStencilFaceFlags, faces, std::uint32_t, mask)
+APS5_EXACT_5(CmdSetStencilOpEXT, VkStencilFaceFlags, faces, VkStencilOp, failOp, VkStencilOp, passOp, VkStencilOp, depthFailOp, VkCompareOp, compareOp)
+APS5_EXACT_2(CmdSetStencilReference, VkStencilFaceFlags, faces, std::uint32_t, reference)
+APS5_EXACT_1(CmdSetStencilTestEnableEXT, VkBool32, enable)
+APS5_EXACT_2(CmdSetStencilWriteMask, VkStencilFaceFlags, faces, std::uint32_t, mask)
+APS5_EXACT_0(CmdEndRenderPass)
+APS5_EXACT_0(CmdEndRenderingKHR)
+APS5_EXACT_2(CmdEndQuery, VkQueryPool, pool, std::uint32_t, query)
+APS5_EXACT_2(CmdDispatchIndirect, VkBuffer, buffer, VkDeviceSize, offset)
+APS5_EXACT_3(CmdBeginQuery, VkQueryPool, pool, std::uint32_t, query, VkQueryControlFlags, flags)
+APS5_EXACT_3(CmdResetQueryPool, VkQueryPool, pool, std::uint32_t, first, std::uint32_t, count)
+APS5_EXACT_3(CmdDispatch, std::uint32_t, groupX, std::uint32_t, groupY, std::uint32_t, groupZ)
+APS5_EXACT_3(CmdDrawMeshTasksEXT, std::uint32_t, groupX, std::uint32_t, groupY, std::uint32_t, groupZ)
+APS5_EXACT_3(CmdWriteTimestamp, VkPipelineStageFlagBits, stage, VkQueryPool, pool, std::uint32_t, query)
+APS5_EXACT_4(CmdFillBuffer, VkBuffer, buffer, VkDeviceSize, offset, VkDeviceSize, size, std::uint32_t, data)
+APS5_EXACT_4(CmdDrawMeshTasksIndirectEXT, VkBuffer, buffer, VkDeviceSize, offset, std::uint32_t, count, std::uint32_t, stride)
+APS5_EXACT_4(CmdWriteBufferMarkerAMD, VkPipelineStageFlagBits, stage, VkBuffer, buffer, VkDeviceSize, offset, std::uint32_t, marker)
+APS5_EXACT_6(CmdDispatchBase, std::uint32_t, baseX, std::uint32_t, baseY, std::uint32_t, baseZ, std::uint32_t, groupX, std::uint32_t, groupY, std::uint32_t, groupZ)
+APS5_EXACT_6(CmdDrawIndirectCountKHR, VkBuffer, buffer, VkDeviceSize, offset, VkBuffer, countBuffer, VkDeviceSize, countOffset, std::uint32_t, maxDrawCount, std::uint32_t, stride)
+APS5_EXACT_6(CmdDrawIndexedIndirectCountKHR, VkBuffer, buffer, VkDeviceSize, offset, VkBuffer, countBuffer, VkDeviceSize, countOffset, std::uint32_t, maxDrawCount, std::uint32_t, stride)
+APS5_EXACT_7(CmdCopyQueryPoolResults, VkQueryPool, pool, std::uint32_t, first, std::uint32_t, count, VkBuffer, buffer, VkDeviceSize, offset, VkDeviceSize, stride, VkQueryResultFlags, flags)
+#undef APS5_EXACT_0
+#undef APS5_EXACT_1
+#undef APS5_EXACT_7
+#undef APS5_EXACT_2
+#undef APS5_EXACT_3
+#undef APS5_EXACT_4
+#undef APS5_EXACT_5
+
 CommandFunctions exactFunctions() {
     CommandFunctions functions{};
 #define APS5_EXACT(name) functions.name = &Exact<CommandId::name>::Run;
+    APS5_EXACT(CmdBeginQuery)
+    APS5_EXACT(CmdCopyQueryPoolResults)
+    APS5_EXACT(CmdDispatch)
+    APS5_EXACT(CmdDispatchBase)
+    APS5_EXACT(CmdDispatchIndirect)
+    APS5_EXACT(CmdDrawIndexedIndirectCountKHR)
+    APS5_EXACT(CmdDrawIndirectCountKHR)
+    APS5_EXACT(CmdDrawMeshTasksEXT)
+    APS5_EXACT(CmdDrawMeshTasksIndirectEXT)
+    APS5_EXACT(CmdEndQuery)
+    APS5_EXACT(CmdEndRenderPass)
+    APS5_EXACT(CmdEndRenderingKHR)
+    APS5_EXACT(CmdFillBuffer)
+    APS5_EXACT(CmdResetQueryPool)
+    APS5_EXACT(CmdWriteBufferMarkerAMD)
+    APS5_EXACT(CmdWriteTimestamp)
+    APS5_EXACT(CmdBindIndexBuffer)
+    APS5_EXACT(CmdBindPipeline)
+    APS5_EXACT(CmdDraw)
+    APS5_EXACT(CmdDrawIndexed)
+    APS5_EXACT(CmdDrawIndirect)
+    APS5_EXACT(CmdDrawIndexedIndirect)
+    APS5_EXACT(CmdSetCullModeEXT)
+    APS5_EXACT(CmdSetDepthBias)
+    APS5_EXACT(CmdSetDepthBiasEnableEXT)
+    APS5_EXACT(CmdSetDepthBounds)
+    APS5_EXACT(CmdSetDepthBoundsTestEnableEXT)
+    APS5_EXACT(CmdSetDepthCompareOpEXT)
+    APS5_EXACT(CmdSetDepthTestEnableEXT)
+    APS5_EXACT(CmdSetDepthWriteEnableEXT)
+    APS5_EXACT(CmdSetFrontFaceEXT)
+    APS5_EXACT(CmdSetStencilCompareMask)
+    APS5_EXACT(CmdSetStencilOpEXT)
+    APS5_EXACT(CmdSetStencilReference)
+    APS5_EXACT(CmdSetStencilTestEnableEXT)
+    APS5_EXACT(CmdSetStencilWriteMask)
     APS5_EXACT(CmdSetViewport)
     APS5_EXACT(CmdSetScissor)
     APS5_EXACT(CmdSetColorWriteMaskEXT)
@@ -1254,6 +1379,192 @@ void recordEverySpecializedCommand(VkCommandBuffer commands, const Sources& sour
     exactThunk<CommandId::CmdBindShadersEXT>()(commands, 3, sources.stages.data(), sources.shaders.data());
     exactThunk<CommandId::CmdBindShadersEXT>()(commands, 2, sources.stages.data(), nullptr);
     exactThunk<CommandId::CmdPushDescriptorSetKHR>()(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, fake<VkPipelineLayout>(64), 1, 5, sources.writes.data());
+}
+
+std::string firstByteDifference(const std::string& expected, const std::string& actual, const std::vector<std::pair<std::size_t, std::string>>& commands);
+
+template<CommandId Id>
+decltype(&Exact<Id>::Run) exactEntry() {
+    return &Exact<Id>::Run;
+}
+
+void fillExactDeviceTable(AgcDriver::Graphics::DeviceFunctions& table) {
+    table.cmdBindDescriptorSets = exactEntry<CommandId::CmdBindDescriptorSets>();
+    table.cmdBindIndexBuffer = exactEntry<CommandId::CmdBindIndexBuffer>();
+    table.cmdBindPipeline = exactEntry<CommandId::CmdBindPipeline>();
+    table.cmdBindVertexBuffers = exactEntry<CommandId::CmdBindVertexBuffers>();
+    table.cmdDraw = exactEntry<CommandId::CmdDraw>();
+    table.cmdDrawIndexed = exactEntry<CommandId::CmdDrawIndexed>();
+    table.cmdDrawIndexedIndirect = exactEntry<CommandId::CmdDrawIndexedIndirect>();
+    table.cmdDrawIndirect = exactEntry<CommandId::CmdDrawIndirect>();
+    table.cmdSetColorWriteMask = exactEntry<CommandId::CmdSetColorWriteMaskEXT>();
+    table.cmdSetCullMode = exactEntry<CommandId::CmdSetCullModeEXT>();
+    table.cmdSetDepthBias = exactEntry<CommandId::CmdSetDepthBias>();
+    table.cmdSetDepthBiasEnable = exactEntry<CommandId::CmdSetDepthBiasEnableEXT>();
+    table.cmdSetDepthBounds = exactEntry<CommandId::CmdSetDepthBounds>();
+    table.cmdSetDepthBoundsTestEnable = exactEntry<CommandId::CmdSetDepthBoundsTestEnableEXT>();
+    table.cmdSetDepthCompareOp = exactEntry<CommandId::CmdSetDepthCompareOpEXT>();
+    table.cmdSetDepthTestEnable = exactEntry<CommandId::CmdSetDepthTestEnableEXT>();
+    table.cmdSetDepthWriteEnable = exactEntry<CommandId::CmdSetDepthWriteEnableEXT>();
+    table.cmdSetFrontFace = exactEntry<CommandId::CmdSetFrontFaceEXT>();
+    table.cmdSetScissor = exactEntry<CommandId::CmdSetScissor>();
+    table.cmdSetStencilCompareMask = exactEntry<CommandId::CmdSetStencilCompareMask>();
+    table.cmdSetStencilOp = exactEntry<CommandId::CmdSetStencilOpEXT>();
+    table.cmdSetStencilReference = exactEntry<CommandId::CmdSetStencilReference>();
+    table.cmdSetStencilTestEnable = exactEntry<CommandId::CmdSetStencilTestEnableEXT>();
+    table.cmdSetStencilWriteMask = exactEntry<CommandId::CmdSetStencilWriteMask>();
+    table.cmdSetViewport = exactEntry<CommandId::CmdSetViewport>();
+}
+
+void recordEveryOverlayCommand(const AgcDriver::Graphics::Context& context, const CommandFunctions* batch, VkCommandBuffer commands, const Sources& sources) {
+    using AgcDriver::Graphics::DeviceFunctions;
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdBindDescriptorSets, &DeviceFunctions::cmdBindDescriptorSets, "vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, fake<VkPipelineLayout>(80), 0, 3, sources.sets.data(), 4, sources.dynamicOffsets.data());
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdBindIndexBuffer, &DeviceFunctions::cmdBindIndexBuffer, "vkCmdBindIndexBuffer")(commands, handle(81), 8, VK_INDEX_TYPE_UINT32);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdBindPipeline, &DeviceFunctions::cmdBindPipeline, "vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, fake<VkPipeline>(82));
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdBindVertexBuffers, &DeviceFunctions::cmdBindVertexBuffers, "vkCmdBindVertexBuffers")(commands, 4, 3, sources.vertexBuffers.data(), sources.vertexOffsets.data());
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdDraw, &DeviceFunctions::cmdDraw, "vkCmdDraw")(commands, 11, 2, 3, 4);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdDrawIndexed, &DeviceFunctions::cmdDrawIndexed, "vkCmdDrawIndexed")(commands, 21, 2, 3, -4, 5);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdDrawIndirect, &DeviceFunctions::cmdDrawIndirect, "vkCmdDrawIndirect")(commands, handle(83), 16, 6, 32);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdDrawIndexedIndirect, &DeviceFunctions::cmdDrawIndexedIndirect, "vkCmdDrawIndexedIndirect")(commands, handle(84), 24, 7, 40);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetColorWriteMaskEXT, &DeviceFunctions::cmdSetColorWriteMask, "vkCmdSetColorWriteMaskEXT")(commands, 0, 3, sources.masks.data());
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetCullModeEXT, &DeviceFunctions::cmdSetCullMode, "vkCmdSetCullModeEXT")(commands, VK_CULL_MODE_BACK_BIT);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetDepthBias, &DeviceFunctions::cmdSetDepthBias, "vkCmdSetDepthBias")(commands, 1.5f, 0.25f, 2.5f);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetDepthBiasEnableEXT, &DeviceFunctions::cmdSetDepthBiasEnable, "vkCmdSetDepthBiasEnableEXT")(commands, VK_TRUE);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetDepthBounds, &DeviceFunctions::cmdSetDepthBounds, "vkCmdSetDepthBounds")(commands, 0.25f, 0.75f);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetDepthBoundsTestEnableEXT, &DeviceFunctions::cmdSetDepthBoundsTestEnable, "vkCmdSetDepthBoundsTestEnableEXT")(commands, VK_TRUE);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetDepthCompareOpEXT, &DeviceFunctions::cmdSetDepthCompareOp, "vkCmdSetDepthCompareOpEXT")(commands, VK_COMPARE_OP_LESS_OR_EQUAL);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetDepthTestEnableEXT, &DeviceFunctions::cmdSetDepthTestEnable, "vkCmdSetDepthTestEnableEXT")(commands, VK_TRUE);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetDepthWriteEnableEXT, &DeviceFunctions::cmdSetDepthWriteEnable, "vkCmdSetDepthWriteEnableEXT")(commands, VK_TRUE);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetFrontFaceEXT, &DeviceFunctions::cmdSetFrontFace, "vkCmdSetFrontFaceEXT")(commands, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetScissor, &DeviceFunctions::cmdSetScissor, "vkCmdSetScissor")(commands, 0, 3, sources.rects.data());
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetStencilCompareMask, &DeviceFunctions::cmdSetStencilCompareMask, "vkCmdSetStencilCompareMask")(commands, VK_STENCIL_FACE_FRONT_AND_BACK, 0x7f);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetStencilOpEXT, &DeviceFunctions::cmdSetStencilOp, "vkCmdSetStencilOpEXT")(commands, VK_STENCIL_FACE_FRONT_BIT, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_INVERT, VK_COMPARE_OP_GREATER);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetStencilReference, &DeviceFunctions::cmdSetStencilReference, "vkCmdSetStencilReference")(commands, VK_STENCIL_FACE_BACK_BIT, 0x33);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetStencilTestEnableEXT, &DeviceFunctions::cmdSetStencilTestEnable, "vkCmdSetStencilTestEnableEXT")(commands, VK_TRUE);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetStencilWriteMask, &DeviceFunctions::cmdSetStencilWriteMask, "vkCmdSetStencilWriteMask")(commands, VK_STENCIL_FACE_FRONT_AND_BACK, 0x0f);
+    context.ForBatch(context.BatchFor(batch), &CommandFunctions::CmdSetViewport, &DeviceFunctions::cmdSetViewport, "vkCmdSetViewport")(commands, 0, 3, sources.viewports.data());
+}
+
+void OverlayTablesRecordWhatDirectRecords() {
+    const auto exact = exactFunctions();
+    AgcDriver::Graphics::DeviceFunctions deviceTable{};
+    fillExactDeviceTable(deviceTable);
+    AgcDriver::Graphics::Context context{};
+    context.functions = &deviceTable;
+    CommandFunctions directBatch = exact;
+    directBatch.listed = &deviceTable;
+    CommandFunctions streamedBatch = AgcDriver::Graphics::StreamedCommands();
+    streamedBatch.listed = &deviceTable;
+    const auto target = FakeCommandBuffer(71);
+    Sources sources;
+    prepare(sources);
+    captured.clear();
+    capturedCommands.clear();
+    recordEveryOverlayCommand(context, &directBatch, target, sources);
+    const auto expected = captured;
+    const auto commandsAt = capturedCommands;
+    Require(expected.size() > 1000, "the typed direct recording captured only " + std::to_string(expected.size()) + " bytes");
+    const auto commands = commandsAt.size();
+    Require(commands == 25, "the typed direct recording captured " + std::to_string(commands) + " commands");
+    CommandStream stream(exact);
+    captured.clear();
+    recordEveryOverlayCommand(context, &streamedBatch, stream.Handle(), sources);
+    Require(captured.empty(), "a typed command reached the driver while recording");
+    Require(stream.Materialized() == VK_NULL_HANDLE && !stream.Poisoned(), "a typed command demoted the stream");
+    std::memset(static_cast<void*>(&sources), 0xA5, sizeof(sources));
+    stream.Seal();
+    AgcDriver::Graphics::Replay(stream, target, exact);
+    Require(captured == expected, "the typed replay after the sources were overwritten differs: " + firstByteDifference(expected, captured, commandsAt));
+    Require(stream.Ops() == commands, "the stream counted " + std::to_string(stream.Ops()) + " ops for " + std::to_string(commands) + " commands");
+}
+
+template<typename Pfn>
+void recordChainedPushDescriptor(Pfn pushDescriptor, VkCommandBuffer commands, const Sources& sources, const void* chain) {
+    auto writes = sources.writes;
+    writes[0].pNext = chain;
+    pushDescriptor(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, fake<VkPipelineLayout>(90), 1, 5, writes.data());
+}
+
+void recordEveryPlainCommand(const CommandFunctions& functions, VkCommandBuffer commands, const Sources& sources) {
+    functions.CmdBeginQuery(commands, fake<VkQueryPool>(91), 3, VK_QUERY_CONTROL_PRECISE_BIT);
+    functions.CmdCopyQueryPoolResults(commands, fake<VkQueryPool>(92), 4, 5, handle(94), 32, 8, VK_QUERY_RESULT_WAIT_BIT);
+    functions.CmdDispatch(commands, 6, 7, 8);
+    functions.CmdDispatchBase(commands, 1, 2, 3, 6, 7, 8);
+    functions.CmdDispatchIndirect(commands, handle(95), 40);
+    functions.CmdDrawIndexedIndirectCountKHR(commands, handle(96), 8, handle(97), 16, 9, 20);
+    functions.CmdDrawIndirectCountKHR(commands, handle(98), 24, handle(99), 32, 10, 28);
+    functions.CmdDrawMeshTasksEXT(commands, 11, 12, 13);
+    functions.CmdDrawMeshTasksIndirectEXT(commands, handle(100), 48, 14, 12);
+    functions.CmdEndQuery(commands, fake<VkQueryPool>(101), 5);
+    functions.CmdEndRenderPass(commands);
+    functions.CmdEndRenderingKHR(commands);
+    functions.CmdFillBuffer(commands, handle(102), 64, 4096, 0x12345678u);
+    functions.CmdResetQueryPool(commands, fake<VkQueryPool>(103), 6, 7);
+    functions.CmdWriteBufferMarkerAMD(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, handle(104), 72, 0xdeadbeefu);
+    functions.CmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, fake<VkQueryPool>(105), 8);
+}
+
+void PlainStreamersKeepEveryArgument() {
+    const auto exact = exactFunctions();
+    const auto target = FakeCommandBuffer(73);
+    Sources sources;
+    prepare(sources);
+    captured.clear();
+    capturedCommands.clear();
+    recordEveryPlainCommand(exact, target, sources);
+    const auto expected = captured;
+    const auto commandsAt = capturedCommands;
+    Require(commandsAt.size() == 16, "the plain direct recording captured " + std::to_string(commandsAt.size()) + " commands");
+    const auto& streamed = AgcDriver::Graphics::StreamedCommands();
+    CommandStream stream(exact);
+    captured.clear();
+    capturedCommands.clear();
+    recordEveryPlainCommand(streamed, stream.Handle(), sources);
+    Require(captured.empty(), "a plain command reached the driver while recording");
+    Require(stream.Materialized() == VK_NULL_HANDLE && !stream.Poisoned(), "a plain command demoted the stream");
+    std::memset(static_cast<void*>(&sources), 0xA5, sizeof(sources));
+    stream.Seal();
+    AgcDriver::Graphics::Replay(stream, target, exact);
+    Require(captured == expected, "the plain replay after the sources were overwritten differs: " + firstByteDifference(expected, captured, commandsAt));
+    Require(stream.Ops() == commandsAt.size(), "the stream counted " + std::to_string(stream.Ops()) + " ops for " + std::to_string(commandsAt.size()) + " commands");
+}
+
+void DemotedTypedStreamReplaysEveryArgumentInOrder() {
+    const auto exact = exactFunctions();
+    AgcDriver::Graphics::DeviceFunctions deviceTable{};
+    fillExactDeviceTable(deviceTable);
+    AgcDriver::Graphics::Context context{};
+    context.functions = &deviceTable;
+    CommandFunctions directBatch = exact;
+    directBatch.listed = &deviceTable;
+    CommandFunctions streamedBatch = AgcDriver::Graphics::StreamedCommands();
+    streamedBatch.listed = &deviceTable;
+    const auto target = FakeCommandBuffer(74);
+    VkMemoryBarrier2 chain{};
+    chain.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    Sources sources;
+    prepare(sources);
+    captured.clear();
+    capturedCommands.clear();
+    recordEveryOverlayCommand(context, &directBatch, target, sources);
+    recordChainedPushDescriptor(exact.CmdPushDescriptorSetKHR, target, sources, &chain);
+    recordEveryOverlayCommand(context, &directBatch, target, sources);
+    const auto expected = captured;
+    const auto commandsAt = capturedCommands;
+    Require(commandsAt.size() == 51, "the demotion reference captured " + std::to_string(commandsAt.size()) + " commands");
+    const auto streamedPush = AgcDriver::Graphics::StreamedCommands().CmdPushDescriptorSetKHR;
+    FakeMaterializer materializer(target);
+    CommandStream stream(exact, nullptr, &materializer);
+    captured.clear();
+    capturedCommands.clear();
+    recordEveryOverlayCommand(context, &streamedBatch, stream.Handle(), sources);
+    Require(stream.Materialized() == VK_NULL_HANDLE, "a typed command demoted the stream before the chained push descriptor");
+    recordChainedPushDescriptor(streamedPush, stream.Handle(), sources, &chain);
+    Require(stream.Materialized() != VK_NULL_HANDLE && stream.DemotedBy().command != nullptr && std::string_view(stream.DemotedBy().command) == "vkCmdPushDescriptorSetKHR", "a chained push descriptor did not demote the stream");
+    Require(materializer.begun == 1 && materializer.buffer == target, "the demotion did not materialize exactly one command buffer");
+    recordEveryOverlayCommand(context, &streamedBatch, stream.Handle(), sources);
+    Require(captured == expected, "the demoted stream recorded a different sequence: " + firstByteDifference(expected, captured, commandsAt));
+    Require(stream.Ops() == 25, "the demoted stream kept " + std::to_string(stream.Ops()) + " records for the 25 commands before its demotion");
 }
 
 std::string firstByteDifference(const std::string& expected, const std::string& actual, const std::vector<std::pair<std::size_t, std::string>>& commands) {
@@ -1525,6 +1836,9 @@ int main(int argc, char** argv) {
         StreamReplayRecordsWhatDirectRecords();
         DemotionReplaysThePrefixInOrder();
         SpecializedStreamersKeepEveryArgument();
+        PlainStreamersKeepEveryArgument();
+        OverlayTablesRecordWhatDirectRecords();
+        DemotedTypedStreamReplaysEveryArgumentInOrder();
         PushDescriptorsDemoteOnlyWhatTheyCannotCopy();
         DemotionWithoutAMaterializerPoisons();
         EntryPointsBeyondTheSlotsAreKeyedByDevice();

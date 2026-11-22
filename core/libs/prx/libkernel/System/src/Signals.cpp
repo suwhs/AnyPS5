@@ -97,6 +97,8 @@ static_assert(sizeof(GuestSiginfo) == 80 && offsetof(GuestSiginfo, code) == 8 &&
     offsetof(GuestSiginfo, uid) == 16 && offsetof(GuestSiginfo, address) == 24 && offsetof(GuestSiginfo, value) == 32 &&
     offsetof(GuestSiginfo, timerid) == 40 && offsetof(GuestSiginfo, overrun) == 44);
 
+using GuestSiginfoHandler = void (APS5_VABI *)(int, GuestSiginfo *, void *);
+
 static_assert(sizeof(KernelTimespec) == 16 && offsetof(KernelTimespec, tv_nsec) == 8);
 bool IgnoredByDefault(int guest) {
     return guest == 16 || guest == GuestSigcont || guest == 20 || guest == 23 || guest == 28 || guest == 29;
@@ -295,7 +297,7 @@ void ResetToDefault(int guest) {
         if (native == SIGSEGV) GuestFaultCopyReinstall_nid_no_patch();
     }
 }
-void RunHandler(int guest, GuestHandler handler) {
+void RunHandler(int guest, GuestHandler handler, const GuestSiginfo* info = nullptr) {
     auto& self = CurrentSignals();
     const int flags = handlerFlags[guest].load();
     std::uint32_t mask[4];
@@ -312,7 +314,8 @@ void RunHandler(int guest, GuestHandler handler) {
         releases[held] = holdReleases[held];
         epochs[held] = static_cast<std::uint32_t>(self.holds[held].fetch_add(1) >> 32);
     }
-    handler(guest);
+    if (info != nullptr) reinterpret_cast<GuestSiginfoHandler>(handler)(guest, const_cast<GuestSiginfo*>(info), nullptr);
+    else handler(guest);
     std::uint32_t replaced[4]{};
     for (int held = 1; held <= MaxSignal; ++held) {
         if ((mask[SignalWord(held)] & SignalBit(held)) == 0) continue;
@@ -344,6 +347,13 @@ void Dispatch(int native) {
 }
 bool Delivered(const GuestSigaction& action) {
     return action.handler > 1 && (action.flags & SaSiginfo) == 0;
+}
+GuestSiginfo LocalSiginfo(int guest, std::int32_t code) {
+    GuestSiginfo info{};
+    info.signo = guest;
+    info.code = code;
+    info.pid = code == GuestSiKernel || code == GuestSiTimer ? 0 : getpid_nid_postfix();
+    return info;
 }
 bool Install(int guest, const GuestSigaction& action) {
     handlerReset[guest].store(false);
@@ -407,7 +417,11 @@ bool TakePendingUnblocked(int* guest) {
 bool DeliverPendingSignal(int guest) {
     const GuestSigaction action = Disposition(guest);
     if (action.handler == 1) return false;
-    if (action.handler > 1 && !Delivered(action)) throw std::runtime_error("signal: SA_SIGINFO handlers are not delivered");
+    if (action.handler > 1 && !Delivered(action)) {
+        const GuestSiginfo info = LocalSiginfo(guest, GuestSiUser);
+        RunHandler(guest, reinterpret_cast<GuestHandler>(action.handler), &info);
+        return true;
+    }
     if (guest == GuestSigalrm && action.handler == 0) TerminateBySigalrm("a pending SIGALRM was unblocked");
     const int native = NativeSignal(guest);
     if (native != 0) {
@@ -870,7 +884,11 @@ static int RaiseWithCode(int guest, std::int32_t code) {
     if (guest == 0) return 0;
     if (guest < 1 || guest > MaxSignal) { *__error_nid_postfix() = 22; return -1; }
     const GuestSigaction action = Disposition(guest);
-    if (action.handler > 1 && !Delivered(action)) throw std::runtime_error("raise: SA_SIGINFO handlers are not delivered");
+    if (action.handler > 1 && !Delivered(action)) {
+        const GuestSiginfo info = LocalSiginfo(guest, code);
+        RunHandler(guest, reinterpret_cast<GuestHandler>(action.handler), &info);
+        return 0;
+    }
     KqueueSignalSent(guest);
     if (action.handler == 1 || (action.handler == 0 && guest != GuestSigcont && IgnoredByDefault(guest))) return 0;
     if (SignalBlocked(guest)) {

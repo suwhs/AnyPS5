@@ -1773,6 +1773,16 @@ std::set<std::uint64_t> createdImportBases;
 std::atomic<std::uint64_t> importHits{0};
 std::atomic<std::uint64_t> importMisses{0};
 std::atomic<std::uint64_t> importCreates{0};
+std::atomic<std::uint64_t> importCreateRetireUs{0};
+std::atomic<std::uint64_t> importCreatePreUs{0};
+std::atomic<std::uint64_t> importCreateDriverUs{0};
+
+std::uint64_t microsecondsSince(std::chrono::steady_clock::time_point start);
+
+bool ImportCreateProfiled() {
+    static const bool enabled = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    return enabled;
+}
 
 ImportRun leasedRun(const GuestAllocations::Lease& lease, std::size_t first, std::size_t last) {
     ImportRun run{lease[first]->address, lease[last]->address + lease[last]->bytes - lease[first]->address, {}};
@@ -2644,6 +2654,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
         if (!joined) oweGrowth(context, state, lease, base, bytes, GrowthBlock::Failed, budget);
         return nullptr;
     };
+    const auto createPreStart = ImportCreateProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 #ifdef _WIN32
     // Drivers pin imported pages, so every page must be committed and accessible.
     const GuestArena::HostImportAccess importAccess(reinterpret_cast<void*>(base), static_cast<std::size_t>(bytes));
@@ -2687,6 +2698,8 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
 #else
     const auto watching = importWatching(context, state, false, true, bytes);
 #endif
+    if (ImportCreateProfiled()) importCreatePreUs.fetch_add(microsecondsSince(createPreStart), std::memory_order_relaxed);
+    const auto createDriverStart = ImportCreateProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const bool watchedHostPointer = watching.hostPointer;
     const bool watchedDmaBuf = watching.dmaBuf;
 #ifndef _WIN32
@@ -2762,6 +2775,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
         }
     }
 #endif
+    if (ImportCreateProfiled()) importCreateDriverUs.fetch_add(microsecondsSince(createDriverStart), std::memory_order_relaxed);
     entry.unwatched = step == nullptr && !(entry.dmaBuf ? watchedDmaBuf : watchedHostPointer);
     if (step != nullptr) {
 #ifdef _WIN32
@@ -2804,6 +2818,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     if (requester == ImportRequester::ColorTarget && !GuestMemory::Watched(base, static_cast<std::size_t>(bytes))) return failedImport();
     first = state.imports.lower_bound(base);
     if (first != state.imports.begin() && std::prev(first)->second.base + std::prev(first)->second.bytes > base) --first;
+    const auto createRetireStart = ImportCreateProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     std::vector<std::pair<std::uint64_t, std::uint64_t>> unwatched;
     std::uint64_t retiredImports = 0;
     std::uint64_t retiredBytes = 0;
@@ -2817,6 +2832,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     }
     importRetiredOverlap.fetch_add(retiredImports, std::memory_order_relaxed);
     importRetiredOverlapBytes.fetch_add(retiredBytes, std::memory_order_relaxed);
+    if (ImportCreateProfiled()) importCreateRetireUs.fetch_add(microsecondsSince(createRetireStart), std::memory_order_relaxed);
     const bool recreated = !createdImportBases.insert(base).second;
     if (recreated) importRecreates.fetch_add(1, std::memory_order_relaxed);
     if (const auto held = !freed && immediate ? state.liveBytes : pinnedTotal(state); held + bytes > budget) retireLeastRecent(context, state, lease, held + bytes - budget, base, base + bytes);
@@ -7365,7 +7381,7 @@ void GuestBufferMemory::UploadFinish(bool addressable, std::optional<std::pair<s
     const auto uploads = uploadsProfiled.fetch_add(1, std::memory_order_relaxed) + 1;
     if (uploads % 2000 == 0) {
         const auto& copies = Copies();
-        AgcDriver::ProfilePrint_nid_no_patch("[buffers] %llu uploads: import lookup %.0f ms, buffer allocation %.0f ms, guest read %.0f ms; upload parts: prepare %.0f ms, pre-walk %.0f ms, lease %.0f ms, lease ranges %llu in %llu acquisitions, import %.0f ms, import hits %llu, misses %llu, creates %llu, recreates %llu, retired overlap %llu (%.1f MiB), retired budget %llu (%.1f MiB), retired total %llu, pin waiter calls %llu retired %llu (%.1f MiB) same range %llu (%.1f MiB), live %.1f MiB, ever %.1f MiB, import access %.0f ms in %llu calls, import lock %.0f ms in %llu holds, prepare lock %.0f ms, refresh imports %.0f ms in %llu calls, decide %.0f ms, flush %.0f ms, tail %.0f ms; regions %llu of %.1f MiB; copies on the GPU: %llu regions (%.0f KiB) copied out of imports, %llu written sub-ranges (%.0f KiB) copied back, %llu staging stores by the CPU at write-back\n", static_cast<unsigned long long>(uploads), importUs.load(std::memory_order_relaxed) / 1000.0, allocateUs.load(std::memory_order_relaxed) / 1000.0, readUs.load(std::memory_order_relaxed) / 1000.0, prepareUs.load(std::memory_order_relaxed) / 1000.0, preWalkUs.load(std::memory_order_relaxed) / 1000.0, leaseUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(leaseRanges.load(std::memory_order_relaxed)), static_cast<unsigned long long>(leaseAcquisitions.load(std::memory_order_relaxed)), importsUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(importHits.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importMisses.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importCreates.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importRecreates.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importRetiredOverlap.load(std::memory_order_relaxed)), importRetiredOverlapBytes.load(std::memory_order_relaxed) / 1048576.0, static_cast<unsigned long long>(importRetiredBudget.load(std::memory_order_relaxed)), importRetiredBudgetBytes.load(std::memory_order_relaxed) / 1048576.0, static_cast<unsigned long long>(RetiredImportSerial()), static_cast<unsigned long long>(importPinWaiterCalls.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importPinWaiterRetired.load(std::memory_order_relaxed)), importPinWaiterRetiredBytes.load(std::memory_order_relaxed) / 1048576.0, static_cast<unsigned long long>(importPinWaiterSameRange.load(std::memory_order_relaxed)), importPinWaiterSameRangeBytes.load(std::memory_order_relaxed) / 1048576.0, Imports().liveBytes / 1048576.0, importedBytesTotal.load(std::memory_order_relaxed) / 1048576.0, importAccessUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(importAccessCount.load(std::memory_order_relaxed)), importLockUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(importLockCount.load(std::memory_order_relaxed)), prepareLockUs.load(std::memory_order_relaxed) / 1000.0, refreshImportsUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(refreshImportCount.load(std::memory_order_relaxed)), decideUs.load(std::memory_order_relaxed) / 1000.0, flushUs.load(std::memory_order_relaxed) / 1000.0, tailUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(uploadedRegions.load(std::memory_order_relaxed)), uploadedBytes.load(std::memory_order_relaxed) / 1048576.0, static_cast<unsigned long long>(copies.gpuCopies.load(std::memory_order_relaxed)), copies.gpuCopyBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.gpuCopyBacks.load(std::memory_order_relaxed)), copies.gpuCopyBackBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.stagingStores.load(std::memory_order_relaxed)));
+        AgcDriver::ProfilePrint_nid_no_patch("[buffers] %llu uploads: import lookup %.0f ms, buffer allocation %.0f ms, guest read %.0f ms; upload parts: prepare %.0f ms, pre-walk %.0f ms, lease %.0f ms, lease ranges %llu in %llu acquisitions, import %.0f ms, import hits %llu, misses %llu, creates %llu, recreates %llu, retired overlap %llu (%.1f MiB), retired budget %llu (%.1f MiB), retired total %llu, pin waiter calls %llu retired %llu (%.1f MiB) same range %llu (%.1f MiB), live %.1f MiB, ever %.1f MiB, create split: retire %.0f ms, pre %.0f ms, driver %.0f ms, import access %.0f ms in %llu calls, import lock %.0f ms in %llu holds, prepare lock %.0f ms, refresh imports %.0f ms in %llu calls, decide %.0f ms, flush %.0f ms, tail %.0f ms; regions %llu of %.1f MiB; copies on the GPU: %llu regions (%.0f KiB) copied out of imports, %llu written sub-ranges (%.0f KiB) copied back, %llu staging stores by the CPU at write-back\n", static_cast<unsigned long long>(uploads), importUs.load(std::memory_order_relaxed) / 1000.0, allocateUs.load(std::memory_order_relaxed) / 1000.0, readUs.load(std::memory_order_relaxed) / 1000.0, prepareUs.load(std::memory_order_relaxed) / 1000.0, preWalkUs.load(std::memory_order_relaxed) / 1000.0, leaseUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(leaseRanges.load(std::memory_order_relaxed)), static_cast<unsigned long long>(leaseAcquisitions.load(std::memory_order_relaxed)), importsUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(importHits.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importMisses.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importCreates.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importRecreates.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importRetiredOverlap.load(std::memory_order_relaxed)), importRetiredOverlapBytes.load(std::memory_order_relaxed) / 1048576.0, static_cast<unsigned long long>(importRetiredBudget.load(std::memory_order_relaxed)), importRetiredBudgetBytes.load(std::memory_order_relaxed) / 1048576.0, static_cast<unsigned long long>(RetiredImportSerial()), static_cast<unsigned long long>(importPinWaiterCalls.load(std::memory_order_relaxed)), static_cast<unsigned long long>(importPinWaiterRetired.load(std::memory_order_relaxed)), importPinWaiterRetiredBytes.load(std::memory_order_relaxed) / 1048576.0, static_cast<unsigned long long>(importPinWaiterSameRange.load(std::memory_order_relaxed)), importPinWaiterSameRangeBytes.load(std::memory_order_relaxed) / 1048576.0, Imports().liveBytes / 1048576.0, importedBytesTotal.load(std::memory_order_relaxed) / 1048576.0, importCreateRetireUs.load(std::memory_order_relaxed) / 1000.0, importCreatePreUs.load(std::memory_order_relaxed) / 1000.0, importCreateDriverUs.load(std::memory_order_relaxed) / 1000.0, importAccessUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(importAccessCount.load(std::memory_order_relaxed)), importLockUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(importLockCount.load(std::memory_order_relaxed)), prepareLockUs.load(std::memory_order_relaxed) / 1000.0, refreshImportsUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(refreshImportCount.load(std::memory_order_relaxed)), decideUs.load(std::memory_order_relaxed) / 1000.0, flushUs.load(std::memory_order_relaxed) / 1000.0, tailUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(uploadedRegions.load(std::memory_order_relaxed)), uploadedBytes.load(std::memory_order_relaxed) / 1048576.0, static_cast<unsigned long long>(copies.gpuCopies.load(std::memory_order_relaxed)), copies.gpuCopyBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.gpuCopyBacks.load(std::memory_order_relaxed)), copies.gpuCopyBackBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.stagingStores.load(std::memory_order_relaxed)));
     }
     const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     if (ms > 50) {

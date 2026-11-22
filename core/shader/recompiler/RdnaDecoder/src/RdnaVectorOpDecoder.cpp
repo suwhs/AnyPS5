@@ -1,5 +1,6 @@
 #include "RdnaDecoder/RdnaVectorOpDecoder.hpp"
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -2002,6 +2003,7 @@ bool supportsNativeVop3ResultModifiers(RdnaOpcode opcode) {
         case RdnaOpcode::VSubrevF32:
         case RdnaOpcode::VMulF32:
         case RdnaOpcode::VMulLegacyF32:
+        case RdnaOpcode::VMadLegacyF32:
         case RdnaOpcode::VMinF32:
         case RdnaOpcode::VMaxF32:
         case RdnaOpcode::VMacF32:
@@ -2057,6 +2059,9 @@ bool readsVop2Accumulator(RdnaOpcode opcode) {
 }
 
 void checkNativeVop3Modifiers(RdnaOpcode opcode, std::uint32_t encodedOpcode, bool permlane, bool carryInOut, bool scalarDst, std::uint32_t abs, std::uint32_t opSel, std::uint32_t clamp, std::uint32_t omod, std::uint32_t neg) {
+    if (std::getenv("APS5_TRACE_VOP3_MODIFIERS") != nullptr && (abs != 0u || opSel != 0u || clamp != 0u || omod != 0u || neg != 0u)) {
+        std::fprintf(stderr, "[vop3-mod] opcode=%u encoded=0x%x permlane=%d carry=%d scalarDst=%d abs=0x%x opSel=0x%x clamp=%u omod=%u neg=0x%x\n", static_cast<unsigned>(opcode), encodedOpcode, permlane ? 1 : 0, carryInOut ? 1 : 0, scalarDst ? 1 : 0, abs, opSel, clamp, omod, neg);
+    }
     if (permlane) {
         if (abs != 0u || (opSel & ~0x3u) != 0u || clamp != 0u || omod != 0u || neg != 0u) {
             throw std::invalid_argument("VOP3 perm-lane op_sel bits are not implemented");

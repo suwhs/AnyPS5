@@ -1,0 +1,5 @@
+# shader
+
+## add Functional
+
+- [VOP3 result modifiers on `v_mad_legacy_f32`](../../../core/shader/recompiler/RdnaDecoder/src/RdnaVectorOpDecoder.cpp) (`v_mad_legacy_f32`) (shader recompiler) - the decoder accepts the VOP3 result modifiers (clamp, omod) on `v_mad_legacy_f32`; the translation applies them to the legacy sum through `writeOperand` -> `applyF32ResultModifiers`, the same f32 rule as the other VOP3 f32 adds and multiplies, so `clamp` saturates to [0,1] under [the f32 clamp rule above](../../../core/shader/recompiler/Translation/src/TranslationContext/OperandAccess.cpp) and `omod` scales the sum. The rounding, zero-product and denormal behaviour of that sum is the measured legacy one; the modifiers themselves are not measured on hardware for this opcode (the sibling `v_mul_legacy_f32` accepts them on main). PPSA90505 compiles `v_mad_legacy_f32` with clamp after its profile load and the driver refused it before. Source modifiers (`abs`, `neg`, `op_sel`) on this opcode still throw. Closes when: clamp and omod on `v_mad_legacy_f32` are measured on a PS5.

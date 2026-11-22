@@ -5383,7 +5383,23 @@ void waitForIdlePublish(const char* reason) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
     if (auto* recorder = Recorder::Active()) {
         Recorder::CountSync(0);
-        recorder->Sync();
+        const auto serial = recorder->SubmitAndEpoch();
+        if (serial == 0) return;
+        if (GuestMemory::GpuMutex().DepthOnThisThread() == 1) {
+            auto& mutex = GuestMemory::GpuMutex();
+            mutex.unlock();
+            try {
+                recorder->WaitSerial(serial);
+            } catch (...) {
+                mutex.lock();
+                throw;
+            }
+            mutex.lock();
+        } else {
+            recorder->Sync();
+            return;
+        }
+        recorder->FinishUpTo(serial);
     }
 }
 

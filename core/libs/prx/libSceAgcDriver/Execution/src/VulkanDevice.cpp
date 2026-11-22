@@ -3252,7 +3252,23 @@ int VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::by
     };
     const auto unimported = [&] {
         if (const int reason = behindCompletions()) return reason;
-        recorder.Sync();
+        const auto serial = recorder.SubmitAndEpoch();
+        if (serial == 0) return 7;
+        if (GuestMemory::GpuMutex().DepthOnThisThread() == 1) {
+            auto& gpu = GuestMemory::GpuMutex();
+            gpu.unlock();
+            try {
+                recorder.WaitSerial(serial);
+            } catch (...) {
+                gpu.lock();
+                throw;
+            }
+            gpu.lock();
+        } else {
+            recorder.Sync();
+            return 7;
+        }
+        recorder.FinishUpTo(serial);
         return 7;
     };
     const bool syncGuest = syncUnimported && [&] {

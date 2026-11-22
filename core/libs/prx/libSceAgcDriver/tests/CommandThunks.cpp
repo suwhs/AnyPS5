@@ -1388,6 +1388,11 @@ decltype(&Exact<Id>::Run) exactEntry() {
     return &Exact<Id>::Run;
 }
 
+template<CommandId Id>
+decltype(&Exact<Id>::Run) keyedExactThunk(VkDevice device) {
+    return reinterpret_cast<decltype(&Exact<Id>::Run)>(AgcDriver::Graphics::CommandThunk(AgcDriver::Graphics::CommandNames()[static_cast<std::size_t>(Id)], reinterpret_cast<PFN_vkVoidFunction>(&Exact<Id>::Run), device));
+}
+
 void fillExactDeviceTable(AgcDriver::Graphics::DeviceFunctions& table) {
     table.cmdBindDescriptorSets = exactEntry<CommandId::CmdBindDescriptorSets>();
     table.cmdBindIndexBuffer = exactEntry<CommandId::CmdBindIndexBuffer>();
@@ -1612,6 +1617,69 @@ void TypedAndThunkPathsMixInOneStream() {
     stream.Seal();
     AgcDriver::Graphics::Replay(stream, target, exact);
     Require(captured == expected, "the mixed typed and thunked replay differs: " + firstByteDifference(expected, captured, commandsAt));
+}
+
+void OverlayBuiltByTheContextKeepsEveryArgument() {
+    using AgcDriver::Graphics::DeviceFunctions;
+    const auto exact = exactFunctions();
+    std::uintptr_t overlayKey = 0;
+    FakeDispatchable overlayDevice{&overlayKey};
+    const auto device = deviceOf(overlayDevice);
+    DeviceFunctions deviceTable{};
+    deviceTable.cmdBindDescriptorSets = keyedExactThunk<CommandId::CmdBindDescriptorSets>(device);
+    deviceTable.cmdBindIndexBuffer = keyedExactThunk<CommandId::CmdBindIndexBuffer>(device);
+    deviceTable.cmdBindPipeline = keyedExactThunk<CommandId::CmdBindPipeline>(device);
+    deviceTable.cmdBindVertexBuffers = keyedExactThunk<CommandId::CmdBindVertexBuffers>(device);
+    deviceTable.cmdDraw = keyedExactThunk<CommandId::CmdDraw>(device);
+    deviceTable.cmdDrawIndexed = keyedExactThunk<CommandId::CmdDrawIndexed>(device);
+    deviceTable.cmdDrawIndexedIndirect = keyedExactThunk<CommandId::CmdDrawIndexedIndirect>(device);
+    deviceTable.cmdDrawIndirect = keyedExactThunk<CommandId::CmdDrawIndirect>(device);
+    deviceTable.cmdSetColorWriteMask = keyedExactThunk<CommandId::CmdSetColorWriteMaskEXT>(device);
+    deviceTable.cmdSetCullMode = keyedExactThunk<CommandId::CmdSetCullModeEXT>(device);
+    deviceTable.cmdSetDepthBias = keyedExactThunk<CommandId::CmdSetDepthBias>(device);
+    deviceTable.cmdSetDepthBiasEnable = keyedExactThunk<CommandId::CmdSetDepthBiasEnableEXT>(device);
+    deviceTable.cmdSetDepthBounds = keyedExactThunk<CommandId::CmdSetDepthBounds>(device);
+    deviceTable.cmdSetDepthBoundsTestEnable = keyedExactThunk<CommandId::CmdSetDepthBoundsTestEnableEXT>(device);
+    deviceTable.cmdSetDepthCompareOp = keyedExactThunk<CommandId::CmdSetDepthCompareOpEXT>(device);
+    deviceTable.cmdSetDepthTestEnable = keyedExactThunk<CommandId::CmdSetDepthTestEnableEXT>(device);
+    deviceTable.cmdSetDepthWriteEnable = keyedExactThunk<CommandId::CmdSetDepthWriteEnableEXT>(device);
+    deviceTable.cmdSetFrontFace = keyedExactThunk<CommandId::CmdSetFrontFaceEXT>(device);
+    deviceTable.cmdSetScissor = keyedExactThunk<CommandId::CmdSetScissor>(device);
+    deviceTable.cmdSetStencilCompareMask = keyedExactThunk<CommandId::CmdSetStencilCompareMask>(device);
+    deviceTable.cmdSetStencilOp = keyedExactThunk<CommandId::CmdSetStencilOpEXT>(device);
+    deviceTable.cmdSetStencilReference = keyedExactThunk<CommandId::CmdSetStencilReference>(device);
+    deviceTable.cmdSetStencilTestEnable = keyedExactThunk<CommandId::CmdSetStencilTestEnableEXT>(device);
+    deviceTable.cmdSetStencilWriteMask = keyedExactThunk<CommandId::CmdSetStencilWriteMask>(device);
+    deviceTable.cmdSetViewport = keyedExactThunk<CommandId::CmdSetViewport>(device);
+    AgcDriver::Graphics::Context context{};
+    context.device = device;
+    context.functions = &deviceTable;
+    CommandFunctions directBatch = exact;
+    CommandFunctions streamedBatch = AgcDriver::Graphics::StreamedCommands();
+    context.OverlayCommands(directBatch, exact);
+    context.OverlayCommands(streamedBatch, exact);
+    directBatch.listed = context.Table();
+    streamedBatch.listed = context.Table();
+    const auto& streamed = AgcDriver::Graphics::StreamedCommands();
+    Require(directBatch.CmdSetViewport == exact.CmdSetViewport && directBatch.CmdDraw == exact.CmdDraw, "the overlay replaced a direct batch's driver entry point");
+    Require(streamedBatch.CmdSetViewport == streamed.CmdSetViewport && streamedBatch.CmdDraw == streamed.CmdDraw, "the overlay replaced a streamed batch's thunk with the device table's entry");
+    const auto target = FakeCommandBuffer(76);
+    Sources sources;
+    prepare(sources);
+    captured.clear();
+    capturedCommands.clear();
+    recordEveryOverlayCommand(context, &directBatch, target, sources);
+    const auto expected = captured;
+    const auto commandsAt = capturedCommands;
+    CommandStream stream(exact);
+    captured.clear();
+    capturedCommands.clear();
+    recordEveryOverlayCommand(context, &streamedBatch, stream.Handle(), sources);
+    Require(captured.empty() && stream.Materialized() == VK_NULL_HANDLE && !stream.Poisoned(), "the overlay-built streamed batch did not stay in the stream");
+    std::memset(static_cast<void*>(&sources), 0xA5, sizeof(sources));
+    stream.Seal();
+    AgcDriver::Graphics::Replay(stream, target, exact);
+    Require(captured == expected, "the overlay-built streamed batch replayed differently: " + firstByteDifference(expected, captured, commandsAt));
 }
 
 std::string firstByteDifference(const std::string& expected, const std::string& actual, const std::vector<std::pair<std::size_t, std::string>>& commands) {
@@ -1890,6 +1958,7 @@ int main(int argc, char** argv) {
         PushDescriptorsDemoteOnlyWhatTheyCannotCopy();
         DemotionWithoutAMaterializerPoisons();
         EntryPointsBeyondTheSlotsAreKeyedByDevice();
+        OverlayBuiltByTheContextKeepsEveryArgument();
         BatchTablesDeferToTheContextsOwnEntryPoints();
         std::cout << "command thunks passed\n";
         return 0;

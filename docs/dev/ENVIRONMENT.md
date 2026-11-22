@@ -631,6 +631,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_VERIFY_BDA_TABLES` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | checks a reused BDA page table against the one just built |
 | `APS5_VERIFY_DATA_HITS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/DispatchCache.cpp` |  | recomputes a dispatch data hit and aborts on a disagreement |
 | `APS5_VERIFY_DRAW_DATA_HITS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp` |  | recomputes a draw data hit and aborts on a disagreement |
+| `APS5_SKIP_STAGE_VERIFY` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp` |  | skips stage-data verification inside the draw materialize loop for A/B profiling |
 | `APS5_VERIFY_DRAW_ENTRIES` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp` |  | re-decodes every draw-cache hit through the full path and checks it |
 | `APS5_VERIFY_DRAW_PIPELINE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | with `APS5_DRAW_PIPELINE` set, runs the full check instead of every 64th reused epoch proof on each thread and prints `[epoch-proofs]` counts |
 | `APS5_VERIFY_DRAW_PLAN` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | builds a draw's plan (validation, fragment outputs, pipeline stages, vertex input layout and resource key) a second time after the draw's record-time work and requires it to equal the plan the draw used |

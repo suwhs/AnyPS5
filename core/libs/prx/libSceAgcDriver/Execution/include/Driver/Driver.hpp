@@ -213,6 +213,7 @@ private:
     static std::atomic<std::uint64_t>& drawCacheUseful();
     static bool drawDataHits();
     static bool verifyDrawDataHits();
+    static bool skipStageVerify();
     static bool drawStageDataHits();
     static bool verifyDrawEntries();
     static bool registerKeyEnabled();

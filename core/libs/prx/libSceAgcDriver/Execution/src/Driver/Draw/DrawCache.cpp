@@ -42,6 +42,11 @@ bool Driver::verifyDrawDataHits() {
     return verify;
 }
 
+bool Driver::skipStageVerify() {
+    static const bool skip = std::getenv("APS5_SKIP_STAGE_VERIFY") != nullptr;
+    return skip;
+}
+
 bool Driver::verifyDrawEntries() {
     static const bool verify = std::getenv("APS5_VERIFY_DRAW_ENTRIES") != nullptr;
     return verify;

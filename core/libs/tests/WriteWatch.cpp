@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -25,7 +26,11 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/ndr.h>
-#elif !defined(__linux__)
+#elif defined(__linux__)
+#include <fcntl.h>
+#include <sys/ptrace.h>
+#include <sys/syscall.h>
+#else
 #error The page protection write watch is the macOS and Linux backend
 #endif
 
@@ -855,6 +860,143 @@ void CheckReadTrapFaultBound() {
     Require(::waitpid(child, &status, 0) == child, "cannot wait for the persistent read fault child");
     Require(WIFSIGNALED(status) && (WTERMSIG(status) == SIGBUS || WTERMSIG(status) == SIGSEGV), "66 threads that keep faulting on a truncated mapping in turn are retried without bound");
 }
+#else
+namespace {
+
+void DrainReaderIds(int handle, std::vector<pid_t>& ids, std::size_t expected) {
+    pid_t id = 0;
+    while (ids.size() < expected && ::read(handle, &id, sizeof(id)) == static_cast<ssize_t>(sizeof(id))) ids.push_back(id);
+}
+
+bool HeldReader(const std::vector<pid_t>& ids, pid_t tid) {
+    return std::find(ids.begin(), ids.end(), tid) != ids.end();
+}
+
+void ContinueTraced(pid_t tid, int signal) {
+    Require(::ptrace(PTRACE_CONT, tid, nullptr, reinterpret_cast<void*>(static_cast<std::uintptr_t>(signal))) == 0, "cannot pass a traced fault on");
+}
+
+}
+
+void CheckReadTrapLateFaults() {
+    constexpr std::size_t Readers = 32;
+    int ids[2];
+    int held[2];
+    int done[2];
+    Require(::pipe(ids) == 0 && ::pipe(held) == 0 && ::pipe(done) == 0, "cannot create the tracing pipes");
+    const auto child = ::fork();
+    Require(child >= 0, "cannot fork a child for late read faults");
+    if (child == 0) {
+        ::alarm(15);
+        ::close(ids[0]);
+        ::close(held[1]);
+        ::close(done[0]);
+        int code = 0;
+        try {
+            Require(::ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) == 0, "cannot ask to be traced");
+            ::raise(SIGTRAP);
+            Region region(1);
+            GuestWriteWatchRegister_nid_postfix(region.base, region.bytes);
+            static_cast<void>(region.Collect());
+            Require(GuestWriteWatchSetReadTrapResolver_nid_postfix(&ResolveTrap), "cannot set the read trap resolver");
+            Traps().fill = 0x6b;
+            Require(GuestWriteWatchTrapReads_nid_postfix(region.Address(0), region.page), "cannot set a read trap");
+            std::atomic<std::size_t> started{0};
+            std::atomic<bool> start{false};
+            std::atomic<std::size_t> wrong{0};
+            std::array<std::thread, Readers> readers;
+            for (auto& reader : readers) {
+                reader = std::thread([&] {
+                    const auto tid = static_cast<pid_t>(::syscall(SYS_gettid));
+                    if (::write(ids[1], &tid, sizeof(tid)) != static_cast<ssize_t>(sizeof(tid))) {
+                        wrong.fetch_add(1);
+                        return;
+                    }
+                    started.fetch_add(1);
+                    while (!start.load()) std::this_thread::yield();
+                    if (*reinterpret_cast<const volatile std::uint8_t*>(region.base) != 0x6b) wrong.fetch_add(1);
+                });
+            }
+            while (started.load() != Readers) std::this_thread::yield();
+            start.store(true);
+            char token = 0;
+            if (::read(held[0], &token, 1) != 1) wrong.fetch_add(1);
+            else if (*reinterpret_cast<const volatile std::uint8_t*>(region.base) != 0x6b) wrong.fetch_add(1);
+            if ((PageProtection(region.base) & PROT_READ) == 0) wrong.fetch_add(1);
+            if (::write(done[1], "d", 1) != 1) wrong.fetch_add(1);
+            for (auto& reader : readers) reader.join();
+            code = wrong.load() == 0 && TakeTrapCalls().size() == 1 ? 0 : 1;
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "%s\n", error.what());
+            code = 1;
+        }
+        ::_exit(code);
+    }
+    ::close(ids[1]);
+    ::close(held[0]);
+    ::close(done[1]);
+    int status = 0;
+    Require(::waitpid(child, &status, 0) == child && WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP, "the traced child did not stop to be traced");
+    Require(::ptrace(PTRACE_SETOPTIONS, child, nullptr, reinterpret_cast<void*>(static_cast<std::uintptr_t>(PTRACE_O_TRACECLONE))) == 0, "cannot trace the child's threads");
+    Require(::ptrace(PTRACE_CONT, child, nullptr, nullptr) == 0, "cannot let the traced child run");
+    Require(::fcntl(ids[0], F_SETFL, O_NONBLOCK) == 0 && ::fcntl(done[0], F_SETFL, O_NONBLOCK) == 0, "cannot make the tracing pipes non-blocking");
+    std::vector<pid_t> readerIds;
+    std::vector<pid_t> stalled;
+    bool told = false;
+    bool released = false;
+    bool reaped = false;
+    int childStatus = 0;
+    for (;;) {
+        DrainReaderIds(ids[0], readerIds, Readers);
+        pid_t tid = 0;
+        while ((tid = ::waitpid(-1, &status, __WALL | WNOHANG)) > 0) {
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                if (tid == child) {
+                    reaped = true;
+                    childStatus = status;
+                }
+                continue;
+            }
+            const int signal = WSTOPSIG(status);
+            const int event = status >> 16;
+            if (signal == SIGTRAP && (event == PTRACE_EVENT_CLONE || event == PTRACE_EVENT_STOP)) {
+                ContinueTraced(tid, 0);
+                continue;
+            }
+            if (signal == SIGSTOP) {
+                ContinueTraced(tid, 0);
+                continue;
+            }
+            if (!released && signal == SIGSEGV && tid != child) {
+                DrainReaderIds(ids[0], readerIds, Readers);
+                if (HeldReader(readerIds, tid)) {
+                    stalled.push_back(tid);
+                    continue;
+                }
+            }
+            ContinueTraced(tid, signal);
+        }
+        if (!told && stalled.size() >= Readers) {
+            Require(::write(held[1], "h", 1) == 1, "cannot tell the child that its faults are held");
+            told = true;
+        }
+        if (told && !released) {
+            char token = 0;
+            const auto finished = ::read(done[0], &token, 1);
+            if (finished == 0) break;
+            if (finished == 1) {
+                for (const auto tid : stalled) ContinueTraced(tid, SIGSEGV);
+                released = true;
+                continue;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) break;
+        }
+        if (reaped) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!reaped) Require(::waitpid(child, &childStatus, 0) == child, "cannot wait for the late read fault child");
+    Require(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0, "32 read faults that arrive after their page was given back are not all retried");
+}
 #endif
 
 void CheckRaisedSignals() {
@@ -954,7 +1096,9 @@ int main(int argc, char** argv) {
         else if (mode == "read-trap-fault") CheckReadTrapFaults();
         else if (mode == "read-trap-trim") CheckReadTrapTrim();
         else if (mode == "read-trap-late") CheckReadTrapLateFaults();
+#if defined(__APPLE__)
         else if (mode == "read-trap-fault-bound") CheckReadTrapFaultBound();
+#endif
         else throw std::runtime_error("unknown write watch test");
         std::printf("write watch %s passed\n", argv[1]);
         return 0;

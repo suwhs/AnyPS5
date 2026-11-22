@@ -663,7 +663,7 @@ void retireImport(VkDevice device, HostImports& state, std::map<std::uint64_t, H
     }
 }
 
-bool releaseParkedImports(HostImports& state, std::uint64_t begin, std::uint64_t end, bool hold = false) {
+bool releaseParkedImports(HostImports& state, std::uint64_t begin, std::uint64_t end) {
     std::vector<std::shared_ptr<RetiredImport>> released;
     {
         std::lock_guard lock(state.mutex);
@@ -680,14 +680,7 @@ bool releaseParkedImports(HostImports& state, std::uint64_t begin, std::uint64_t
             device = list.empty() ? state.parked.erase(device) : std::next(device);
         }
     }
-    const bool any = !released.empty();
-    if (hold && !released.empty()) {
-        if (auto* recorder = Recorder::Active(); recorder != nullptr) {
-            for (auto& holder : released) recorder->KeepThroughHold(std::move(holder));
-            released.clear();
-        }
-    }
-    return any;
+    return !released.empty();
 }
 
 #ifdef _WIN32
@@ -4374,7 +4367,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) {
         if (recorder != nullptr) GuestBufferMemory::ReleaseRetainedSpaces(recorder->Id(), recorder->CompletedThrough());
         const auto end = static_cast<std::uint64_t>(address) + bytes;
         auto& imports = Imports();
-        if (releaseParkedImports(imports, address, end, GuestMemory::GpuMutex().HeldByThisThread())) retiredImport = true;
+        if (releaseParkedImports(imports, address, end)) retiredImport = true;
         const auto lease = GuestAllocations::GuestAllocationsAcquireRegistered_nid_postfix();
         {
             std::lock_guard importsLock(imports.mutex);
@@ -4390,7 +4383,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) {
                         importPinWaiterSameRange.fetch_add(1, std::memory_order_relaxed);
                         importPinWaiterSameRangeBytes.fetch_add(it->second.bytes, std::memory_order_relaxed);
                     }
-                retireImport(imports.device, imports, it, lease, GuestMemory::GpuMutex().HeldByThisThread());
+                retireImport(imports.device, imports, it, lease, false);
                 it = next;
                 retiredImport = true;
             }
@@ -4429,7 +4422,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) {
 
         const auto end = static_cast<std::uint64_t>(address) + bytes;
         auto& imports = Imports();
-        if (releaseParkedImports(imports, address, end, GuestMemory::GpuMutex().HeldByThisThread())) retiredImport = true;
+        if (releaseParkedImports(imports, address, end)) retiredImport = true;
         bool overlapsImport = false;
         {
             std::lock_guard importsLock(imports.mutex);
@@ -4462,7 +4455,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) {
                         importPinWaiterSameRange.fetch_add(1, std::memory_order_relaxed);
                         importPinWaiterSameRangeBytes.fetch_add(it->second.bytes, std::memory_order_relaxed);
                     }
-                    retireImport(imports.device, imports, it, lease, GuestMemory::GpuMutex().HeldByThisThread());
+                    retireImport(imports.device, imports, it, lease, false);
                     it = next;
                     retiredImport = true;
                 }

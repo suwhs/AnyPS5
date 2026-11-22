@@ -638,7 +638,7 @@ bool retireFreesAtOnce(bool hold) {
 
 std::atomic<std::uint64_t> retiredImports{0};
 
-void retireImport(VkDevice device, HostImports& state, std::map<std::uint64_t, HostImport>::iterator it, const GuestAllocations::Lease& lease, bool hold = true) {
+void retireImport(VkDevice device, HostImports& state, std::map<std::uint64_t, HostImport>::iterator it, const GuestAllocations::Lease& lease, bool hold = true, bool park = false) {
 #ifdef _WIN32
     auto* reading = forgetSettle(state, it->first);
 #endif
@@ -650,7 +650,7 @@ void retireImport(VkDevice device, HostImports& state, std::map<std::uint64_t, H
     bumpEpoch(state);
     retiredImports.fetch_add(1, std::memory_order_release);
     state.liveBytes -= it->second.pinnedBytes;
-    const bool parked = ParkHostImport(state.device, state.destroyBuffer, state.freeMemory, it->second);
+    const bool parked = park && ParkHostImport(state.device, state.destroyBuffer, state.freeMemory, it->second);
     auto holder = std::make_shared<RetiredImport>(state.device, state.destroyBuffer, state.freeMemory, state.imports.extract(it), parked);
 #ifdef _WIN32
     if (reading != nullptr) {
@@ -1869,6 +1869,25 @@ std::shared_ptr<ParkedHostImport> TakeParkedImport(std::uint64_t base, std::uint
         return found;
     }
     return nullptr;
+}
+
+void DropParkedImportRange(std::uint64_t begin, std::uint64_t end) {
+    std::vector<std::shared_ptr<ParkedHostImport>> dropped;
+    auto& pool = Parked();
+    {
+        std::lock_guard lock(pool.mutex);
+        for (auto it = pool.entries.begin(); it != pool.entries.end();) {
+            if (begin < (*it)->base + (*it)->bytes && (*it)->base < end) {
+                pool.bytes -= (*it)->bytes;
+                ++pool.dropped;
+                dropped.push_back(*it);
+                it = pool.entries.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (const auto& parked : dropped) ReleaseParked(parked);
 }
 
 void DropParkedImports() {
@@ -4469,6 +4488,7 @@ SnapshotStats& Snapshots() {
 
 bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes, bool remapping) {
     if (!remapping) importPinWaiterProtectOnly.fetch_add(1, std::memory_order_relaxed);
+    else DropParkedImportRange(address, static_cast<std::uint64_t>(address) + bytes);
     importPinWaiterCalls.fetch_add(1, std::memory_order_relaxed);
     const auto start = std::chrono::steady_clock::now();
     bool synced = false;
@@ -4531,7 +4551,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes, bool rem
                         importPinWaiterSameRange.fetch_add(1, std::memory_order_relaxed);
                         importPinWaiterSameRangeBytes.fetch_add(it->second.bytes, std::memory_order_relaxed);
                     }
-                retireImport(imports.device, imports, it, lease, false);
+                retireImport(imports.device, imports, it, lease, false, !remapping);
                 it = next;
                 retiredImport = true;
             }
@@ -4603,7 +4623,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes, bool rem
                         importPinWaiterSameRange.fetch_add(1, std::memory_order_relaxed);
                         importPinWaiterSameRangeBytes.fetch_add(it->second.bytes, std::memory_order_relaxed);
                     }
-                    retireImport(imports.device, imports, it, lease, false);
+                    retireImport(imports.device, imports, it, lease, false, !remapping);
                     it = next;
                     retiredImport = true;
                 }

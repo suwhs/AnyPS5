@@ -179,6 +179,19 @@ struct CommittedSlabs {
     bool operator==(const CommittedSlabs& other) const { return slabs == other.slabs && slabBytes == other.slabBytes; }
 };
 
+struct AlternateTexture {
+    std::shared_ptr<Texture> texture;
+    std::vector<std::byte> bytes;
+    DccKeys keys = DccKeys::Uncompressed;
+    std::uint64_t generation = 0;
+    std::shared_ptr<StorageTexture> source;
+    std::uint64_t sourceVersion = 0;
+    std::uint64_t accounted = 0;
+    std::optional<std::vector<std::pair<std::uint64_t, std::uint64_t>>> committed;
+    std::array<std::uint64_t, 4> untracked{};
+    bool used = false;
+};
+
 struct CachedTexture {
     TextureKey key;
     std::uint64_t address;
@@ -200,7 +213,20 @@ struct CachedTexture {
     std::array<std::uint64_t, 4> untracked{};
     std::uint64_t surfaceBytes = 0;
     std::optional<CommittedSlabs> slabs;
+    AlternateTexture alternate;
 };
+
+void swapRepresentations(CachedTexture& entry) {
+    std::swap(entry.texture, entry.alternate.texture);
+    std::swap(entry.bytes, entry.alternate.bytes);
+    std::swap(entry.keys, entry.alternate.keys);
+    std::swap(entry.generation, entry.alternate.generation);
+    std::swap(entry.source, entry.alternate.source);
+    std::swap(entry.sourceVersion, entry.alternate.sourceVersion);
+    std::swap(entry.accounted, entry.alternate.accounted);
+    std::swap(entry.committed, entry.alternate.committed);
+    std::swap(entry.untracked, entry.alternate.untracked);
+}
 
 // Entries in use order (front = most recent) with a hash index by key: a lookup is O(1) and the
 // eviction takes the back. APS5_NO_TEXTURE_HASH=1 finds entries by scanning the list (the index is
@@ -313,17 +339,22 @@ std::list<CachedTexture>::iterator findTexture(TextureCache& cache, const Textur
     return cache.entries.end();
 }
 
-void eraseTexture(TextureCache& cache, std::list<CachedTexture>::iterator it) {
-    cache.bytes -= it->accounted;
-    if (it->source != nullptr) {
-        for (auto [view, last] = cache.views.equal_range(it->source.get()); view != last; ++view) {
-            if (view->second == it) {
-                cache.views.erase(view);
-                break;
-            }
+void unregisterView(TextureCache& cache, std::list<CachedTexture>::iterator it, const StorageTexture* source) {
+    if (source == nullptr) return;
+    for (auto [view, last] = cache.views.equal_range(source); view != last; ++view) {
+        if (view->second == it) {
+            cache.views.erase(view);
+            break;
         }
     }
+}
+
+void eraseTexture(TextureCache& cache, std::list<CachedTexture>::iterator it) {
+    cache.bytes -= it->accounted + it->alternate.accounted;
+    unregisterView(cache, it, it->source.get());
+    unregisterView(cache, it, it->alternate.source.get());
     if (it->accounted != 0 && it->texture.use_count() > 1) noteReleased(it->texture, it->address);
+    if (it->alternate.accounted != 0 && it->alternate.texture != nullptr && it->alternate.texture.use_count() > 1) noteReleased(it->alternate.texture, it->address);
     cache.index.erase(it->key);
     cache.entries.erase(it);
     ++cache.erasures;
@@ -410,7 +441,7 @@ bool admitTexture(TextureCache& cache, const TextureKey& key, std::uint64_t inco
             ++cache.counts.uncached;
             return false;
         }
-        const bool keep = back->accounted == 0 || (!over && back->texture.use_count() > 1);
+        const bool keep = back->accounted + back->alternate.accounted == 0 || (!over && back->texture.use_count() > 1);
         if (keep && cache.passed < cache.entries.size()) {
             cache.entries.splice(cache.entries.begin(), cache.entries, back);
             ++cache.passed;
@@ -512,6 +543,7 @@ struct TextureCounters {
     std::atomic<std::uint64_t> fromStorage{0};
     std::atomic<std::uint64_t> snapshots{0};
     std::atomic<std::uint64_t> cleared{0};
+    std::atomic<std::uint64_t> clearedReused{0};
     std::atomic<std::uint64_t> imported{0};
     std::atomic<std::uint64_t> pendingReads{0};
     std::atomic<std::uint64_t> storageFallbacks{0};
@@ -561,7 +593,7 @@ void reportTextureCounters() {
     auto last = counters.lastReport.load();
     if (nowMs - last < 10000 || !counters.lastReport.compare_exchange_strong(last, nowMs)) return;
     const auto count = [](const std::atomic<std::uint64_t>& value) { return static_cast<unsigned long long>(value.load(std::memory_order_relaxed)); };
-    AgcDriver::ProfilePrint_nid_no_patch("[textures] sampled created: %llu from storage images, %llu cleared on the GPU, %llu uploaded on the GPU from host imports, %llu snapshots (%llu snapshot reads over recorded writes inside cachedTexture, %llu storage-path fallbacks); stage-A records %llu: %llu fast hits, %llu full lookups; storage images %llu hits, %llu created, %llu own-object refreshes; image tables %llu reused, %llu resolved; dynamic-resolution variants: %llu surfaces, %llu entries substituted, %llu entries rejected; %llu one-layer 2D array entries bound to the 2D texture of their surface; untracked snapshots %llu kept by the write-watch hint, %llu compared; views kept through a pending alias: %llu lookups, %llu revalidations\n", count(counters.fromStorage), count(counters.cleared), count(counters.imported), count(counters.snapshots), count(counters.pendingReads), count(counters.storageFallbacks), count(counters.records), count(counters.fastHits), count(counters.fastMisses), count(counters.storageHits), count(counters.storageCreated), count(counters.ownRefreshes), count(counters.tablesReused), count(counters.tablesResolved), count(counters.variantSurfaces), count(counters.variantSubstituted), count(counters.variantRejected), count(counters.arrayViewsShared), count(counters.untrackedKept), count(counters.untrackedCompared), count(counters.aliasViews), count(counters.aliasRefreshes));
+    AgcDriver::ProfilePrint_nid_no_patch("[textures] sampled created: %llu from storage images, %llu cleared on the GPU, %llu uploaded on the GPU from host imports, %llu snapshots (%llu snapshot reads over recorded writes inside cachedTexture, %llu storage-path fallbacks); stage-A records %llu: %llu fast hits, %llu full lookups; storage images %llu hits, %llu created, %llu own-object refreshes; image tables %llu reused, %llu resolved; dynamic-resolution variants: %llu surfaces, %llu entries substituted, %llu entries rejected; %llu one-layer 2D array entries bound to the 2D texture of their surface; untracked snapshots %llu kept by the write-watch hint, %llu compared; views kept through a pending alias: %llu lookups, %llu revalidations, %llu state switches reused\n", count(counters.fromStorage), count(counters.cleared), count(counters.imported), count(counters.snapshots), count(counters.pendingReads), count(counters.storageFallbacks), count(counters.records), count(counters.fastHits), count(counters.fastMisses), count(counters.storageHits), count(counters.storageCreated), count(counters.ownRefreshes), count(counters.tablesReused), count(counters.tablesResolved), count(counters.variantSurfaces), count(counters.variantSubstituted), count(counters.variantRejected), count(counters.arrayViewsShared), count(counters.untrackedKept), count(counters.untrackedCompared), count(counters.aliasViews), count(counters.aliasRefreshes), count(counters.clearedReused));
 }
 
 // What the sampled-texture lookups on this thread proved their returned objects current against,
@@ -1229,7 +1261,13 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     const CacheHold held(sampledCacheHeld);
     dropUncachedViews(cache);
     std::vector<std::byte> recycled;
+    AlternateTexture keptRepresentation;
     if (auto it = findTexture(cache, key); it != cache.entries.end()) {
+        for (int pass = 0; pass < 2; ++pass) {
+        if (pass == 1) {
+            if (!it->alternate.used || it->alternate.keys != *keys || it->surfaceBytes != guestBytes || !stillCommitted(slabs, it->slabs)) break;
+            swapRepresentations(*it);
+        }
         if (it->source != nullptr) {
             // The view follows the storage image, whatever the GPU wrote to it since; guest memory
             // written meanwhile is taken in by refreshing the image. A fast clear the image cannot
@@ -1244,6 +1282,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 logLookup({it->texture.get(), resource, guestBytes, *keys, 0, it->source.get()});
                 reportTextureCounters();
                 if (profile) LookupOutcomes::Add(*keys != DccKeys::Uncompressed ? LookupOutcomes::SampledHitClearedView : LookupOutcomes::SampledHitView, start);
+                if (pass == 1) counters.clearedReused.fetch_add(1, std::memory_order_relaxed);
                 return it->texture;
             }
         } else if (source == nullptr && it->surfaceBytes == guestBytes && it->keys == *keys && it->slabs == slabs && stillCommitted(slabs, it->slabs)) {
@@ -1279,8 +1318,24 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 logLookup(record);
                 reportTextureCounters();
                 if (profile) LookupOutcomes::Add(LookupOutcomes::SampledHitSnapshot, start);
+                if (pass == 1) counters.clearedReused.fetch_add(1, std::memory_order_relaxed);
                 return it->texture;
             }
+        }
+        if (pass == 1) swapRepresentations(*it);
+        }
+        if (it->bytes.empty() && (it->source != nullptr || it->keys != DccKeys::Uncompressed)) {
+            keptRepresentation.texture = std::move(it->texture);
+            keptRepresentation.bytes = std::move(it->bytes);
+            keptRepresentation.keys = it->keys;
+            keptRepresentation.generation = it->generation;
+            keptRepresentation.source = it->source;
+            keptRepresentation.sourceVersion = it->sourceVersion;
+            keptRepresentation.accounted = it->accounted;
+            keptRepresentation.committed = std::move(it->committed);
+            keptRepresentation.untracked = it->untracked;
+            keptRepresentation.used = true;
+            it->accounted = 0;
         }
         if (it->bytes.size() == snapshotSize) recycled = std::move(it->bytes);
         else parkSnapshot(cache, it->bytes);
@@ -1369,7 +1424,9 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         }
         return record;
     };
-    if (!admitTexture(cache, key, entry.accounted, budget)) {
+    entry.alternate = std::move(keptRepresentation);
+    const auto incoming = entry.accounted + entry.alternate.accounted;
+    if (!admitTexture(cache, key, incoming, budget)) {
         noteReleased(texture, resource.baseAddress);
         logLookup(madeRecord());
         reportCacheCounts(cache, budget);
@@ -1377,13 +1434,14 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         if (profile) LookupOutcomes::Add(source != nullptr ? LookupOutcomes::SampledMadeView : LookupOutcomes::SampledMadeSnapshot, start);
         return texture;
     }
-    cache.bytes += entry.accounted;
+    cache.bytes += incoming;
     entry.present = Recorder::Presents();
     ++cache.counts.inserted;
     logLookup(madeRecord());
     cache.entries.push_front(std::move(entry));
     cache.index[key] = cache.entries.begin();
     if (source != nullptr) cache.views.emplace(source.get(), cache.entries.begin());
+    if (cache.entries.front().alternate.source != nullptr) cache.views.emplace(cache.entries.front().alternate.source.get(), cache.entries.begin());
     reportCacheCounts(cache, budget);
     reportTextureCounters();
     if (profile) LookupOutcomes::Add(source != nullptr ? LookupOutcomes::SampledMadeView : LookupOutcomes::SampledMadeSnapshot, start);

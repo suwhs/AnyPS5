@@ -565,6 +565,15 @@ auto& g_directLock = MemoryState().directLock;
 auto& g_physBlocks = MemoryState().physBlocks;
 auto& g_physPages = MemoryState().physPages;
 auto& g_directMappings = MemoryState().directMappings;
+std::atomic<std::uint64_t> g_directMappingSerial{0};
+
+std::uint64_t DirectMappingSerial() {
+    return g_directMappingSerial.load(std::memory_order_acquire);
+}
+
+void NoteDirectMappingChange() {
+    g_directMappingSerial.fetch_add(1, std::memory_order_release);
+}
 auto& g_releaseClaims = MemoryState().releaseClaims;
 auto& g_mapHolds = MemoryState().mapHolds;
 auto& g_physicalSpans = MemoryState().physicalSpans;
@@ -585,6 +594,7 @@ void SplitPhysicalSpan(std::uint64_t at) {
 std::map<std::uintptr_t, DirectMapping>::iterator InsertMapping(std::uintptr_t base, DirectMapping mapping) {
     const auto [inserted, added] = g_directMappings.emplace(base, std::move(mapping));
     if (!added) throw std::runtime_error("direct mapping inserted over a live one");
+    NoteDirectMappingChange();
     const auto first = inserted->second.phys;
     const auto last = first + (inserted->second.end - base);
     SplitPhysicalSpan(first);
@@ -600,6 +610,7 @@ std::map<std::uintptr_t, DirectMapping>::iterator InsertMapping(std::uintptr_t b
 }
 
 std::map<std::uintptr_t, DirectMapping>::iterator RemoveMapping(std::map<std::uintptr_t, DirectMapping>::iterator mapping) {
+    NoteDirectMappingChange();
     const auto base = mapping->first;
     const auto first = mapping->second.phys;
     const auto last = first + (mapping->second.end - base);

@@ -29,6 +29,7 @@ void DirectMemoryWakeReleaseClaims();
 void CreateDirectMemoryBacking(int64_t start, size_t len);
 bool QueryDirectMapping(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end, std::uint64_t* offset, int* memoryType);
 bool DirectMemoryAliased(std::uintptr_t address, std::size_t bytes);
+std::uint64_t DirectMappingSerial();
 void ForgetDirectMemory(int64_t start, size_t len);
 
 struct DirectMemoryView {

@@ -35,6 +35,7 @@
 #include "RdnaDecoder/include/RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include "IntermediateRepresentation/include/IntermediateRepresentation/IrMetadata/BufferFormat.hpp"
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <array>
 #include <bit>
@@ -5326,25 +5327,38 @@ void ResolveLabelTrap(std::uintptr_t begin, std::uintptr_t end) {
     }
 }
 
+bool SwitchTextIsOff(const char* text) {
+    if (text == nullptr) return false;
+    std::string value(text);
+    const auto first = value.find_first_not_of(" \t");
+    const auto last = value.find_last_not_of(" \t");
+    if (first == std::string::npos) return false;
+    value = value.substr(first, last - first + 1);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value == "0" || value == "false" || value == "off" || value == "no";
+}
+
+bool EnabledUnlessSwitchedOff(const char* name) {
+    return !SwitchTextIsOff(std::getenv(name));
+}
+
+bool DisabledByRequest(const char* name) {
+    const char* text = std::getenv(name);
+    return text != nullptr && !SwitchTextIsOff(text);
+}
+
 bool ReadTrapsEnabled() {
     static const bool enabled = [] {
-#if defined(__linux__)
-        if (std::getenv("APS5_LABEL_READ_TRAP") == nullptr && std::getenv("APS5_REFRESH_READ_TRAP") == nullptr) return false;
-#else
-        if (std::getenv("APS5_NO_LABEL_READ_TRAP") != nullptr && std::getenv("APS5_REFRESH_READ_TRAP") == nullptr) return false;
-#endif
+        const bool label = !DisabledByRequest("APS5_NO_LABEL_READ_TRAP") && EnabledUnlessSwitchedOff("APS5_LABEL_READ_TRAP");
+        const bool refresh = EnabledUnlessSwitchedOff("APS5_REFRESH_READ_TRAP");
+        if (!label && !refresh) return false;
         if (!GuestWriteWatch::GuestWriteWatchSetReadTrapResolver_nid_postfix(&ResolveLabelTrap)) return false;
         GuestWriteWatch::GuestWriteWatchSetReadTrapBypass_nid_postfix(+[] {
             const bool held = GuestMemory::GpuMutex().HeldByThisThread();
             if (held) labelTrapBypass.fetch_add(1, std::memory_order_relaxed);
             return held;
         });
-#if defined(__linux__)
-        const bool label = std::getenv("APS5_LABEL_READ_TRAP") != nullptr;
-#else
-        const bool label = std::getenv("APS5_NO_LABEL_READ_TRAP") == nullptr;
-#endif
-        std::fprintf(stderr, "[read-trap] read traps enabled (label=%d refresh=%d)\n", label, std::getenv("APS5_REFRESH_READ_TRAP") != nullptr);
+        std::fprintf(stderr, "[read-trap] read traps enabled (label=%d refresh=%d)\n", label, refresh);
         return true;
     }();
     return enabled;
@@ -5353,17 +5367,13 @@ bool ReadTrapsEnabled() {
 bool LabelTrapsEnabled() {
     static const bool enabled = [] {
         if (!ReadTrapsEnabled()) return false;
-#if defined(__linux__)
-        return std::getenv("APS5_LABEL_READ_TRAP") != nullptr;
-#else
-        return std::getenv("APS5_NO_LABEL_READ_TRAP") == nullptr;
-#endif
+        return !DisabledByRequest("APS5_NO_LABEL_READ_TRAP") && EnabledUnlessSwitchedOff("APS5_LABEL_READ_TRAP");
     }();
     return enabled;
 }
 
 bool RefreshTrapsEnabled() {
-    static const bool enabled = ReadTrapsEnabled() && std::getenv("APS5_REFRESH_READ_TRAP") != nullptr;
+    static const bool enabled = ReadTrapsEnabled() && EnabledUnlessSwitchedOff("APS5_REFRESH_READ_TRAP");
     return enabled;
 }
 #endif

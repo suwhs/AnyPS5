@@ -53,6 +53,7 @@ constexpr int SaNodefer = 0x10;
 constexpr int SaSiginfo = 0x40;
 constexpr int SaDefinedFlags = 0x7f;
 std::atomic<GuestHandler> handlers[MaxSignal + 1]{};
+std::atomic<GuestHandler> deliveryHandlers[MaxSignal + 1]{};
 std::atomic<std::uint32_t> handlerMasks[MaxSignal + 1][4]{};
 std::atomic<int> handlerFlags[MaxSignal + 1]{};
 std::atomic<bool> handlerReset[MaxSignal + 1]{};
@@ -189,6 +190,14 @@ PendingSignals& Pending() {
     return *state;
 }
 
+thread_local int signalWaitDepth = 0;
+struct SignalWaitScope {
+    SignalWaitScope() { ++signalWaitDepth; }
+    ~SignalWaitScope() { --signalWaitDepth; }
+    SignalWaitScope(const SignalWaitScope&) = delete;
+    SignalWaitScope& operator=(const SignalWaitScope&) = delete;
+};
+
 void MarkPending(int guest, std::int32_t code) {
     auto& pending = Pending();
     {
@@ -294,6 +303,7 @@ int NativeSignal(int guest) {
 void ResetToDefault(int guest) {
     handlerReset[guest].store(true);
     handlers[guest].store(nullptr);
+    deliveryHandlers[guest].store(nullptr, std::memory_order_release);
     if (const int native = NativeSignal(guest)) {
         std::signal(native, SIG_DFL);
         if (native == SIGSEGV) GuestFaultCopyReinstall_nid_no_patch();
@@ -431,6 +441,7 @@ bool Install(int guest, const GuestSigaction& action) {
     handlerReset[guest].store(false);
     for (int word = 0; word < 4; ++word) handlerMasks[guest][word].store(action.mask.bits[word]);
     handlerFlags[guest].store(action.flags);
+    deliveryHandlers[guest].store(action.handler > 1 ? reinterpret_cast<GuestHandler>(action.handler) : nullptr, std::memory_order_release);
     const int native = NativeSignal(guest);
     if (!native) return true;
     const auto previous = handlers[guest].exchange(Delivered(action) ? reinterpret_cast<GuestHandler>(action.handler) : nullptr);
@@ -450,6 +461,7 @@ void SettleReset(int guest) {
     if (!handlerReset[guest].exchange(false)) return;
     dispositions[guest].handler = 0;
     dispositions[guest].flags &= ~SaSiginfo;
+    deliveryHandlers[guest].store(nullptr, std::memory_order_release);
 }
 
 GuestSigaction Disposition(int guest) {
@@ -518,6 +530,50 @@ bool DeliverUnblockedPending() {
     return caught;
 }
 
+#ifndef _WIN32
+constexpr int DeliveryKickSignal = SIGURG;
+
+void DeliveryKick(int, siginfo_t*, void*) {
+    if (signalWaitDepth != 0) return;
+    auto& pending = Pending();
+    for (int guest = 1; guest <= MaxSignal; ++guest) {
+        if (SignalBlocked(CurrentSignals(), guest)) continue;
+        if ((pending.words[SignalWord(guest)].load(std::memory_order_relaxed) & SignalBit(guest)) == 0) continue;
+        const GuestHandler handler = deliveryHandlers[guest].load(std::memory_order_acquire);
+        if (handler == nullptr || reinterpret_cast<std::uintptr_t>(handler) <= 1) continue;
+        QueuedSignal entry{};
+        {
+            std::unique_lock lock(pending.lock, std::try_to_lock);
+            if (!lock.owns_lock()) return;
+            if (!TakePendingLocked(guest, &entry)) continue;
+        }
+        if ((handlerFlags[guest].load(std::memory_order_acquire) & SaSiginfo) != 0) {
+            const GuestSiginfo info = LocalSiginfo(guest, entry.code);
+            RunHandler(guest, handler, &info);
+        } else {
+            RunHandler(guest, handler);
+        }
+    }
+}
+
+void InstallDeliveryKick() {
+    static const bool installed = [] {
+        struct sigaction action{};
+        action.sa_sigaction = DeliveryKick;
+        action.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&action.sa_mask);
+        return sigaction(DeliveryKickSignal, &action, nullptr) == 0;
+    }();
+    (void)installed;
+}
+
+bool KickPendingDelivery(Pthread thread) {
+    if (thread == nullptr) return false;
+    InstallDeliveryKick();
+    return pthread_kill(thread->hostThread, DeliveryKickSignal) == 0;
+}
+#endif
+
 std::optional<std::uint64_t> SignalWaitDeadline(const KernelTimespec& timeout) {
     if (timeout.tv_sec > INT32_MAX) return std::nullopt;
     const std::uint64_t now = TimedWait::NowNanos();
@@ -526,6 +582,7 @@ std::optional<std::uint64_t> SignalWaitDeadline(const KernelTimespec& timeout) {
 }
 
 int WaitForPendingInSet(const GuestSignalSet& set, bool waitForever, const KernelTimespec* timeout, int* guest, QueuedSignal* taken) {
+    const SignalWaitScope waitScope;
     auto& pending = Pending();
     std::unique_lock lock(pending.lock);
     const std::optional<std::uint64_t> deadline = waitForever ? std::nullopt : SignalWaitDeadline(*timeout);
@@ -555,6 +612,7 @@ bool FillSiginfo(GuestSiginfo* info, int guest, const QueuedSignal& entry) {
 }
 
 void WaitForDeliverableSignal() {
+    const SignalWaitScope waitScope;
     auto& pending = Pending();
     for (;;) {
         int guest = 0;
@@ -1008,6 +1066,9 @@ int APS5_VABI pthread_kill_nid_postfix(Pthread thread, int guest) {
     if (!GuestThreadIsLive(thread)) return PosixThread::GUEST_ESRCH;
     if (guest == 0) return 0;
     if (Disposition(guest).handler != 1) MarkPending(guest, GuestSiLwp);
+#ifndef _WIN32
+    if (deliveryHandlers[guest].load(std::memory_order_acquire) != nullptr) KickPendingDelivery(thread);
+#endif
     KqueueSignalSent(guest);
     return 0;
 }

@@ -625,7 +625,24 @@ static bool SleepTraceEnabled() {
     return enabled;
 }
 
+static std::uint64_t SleepCapNanos() {
+    static const std::uint64_t value = []() -> std::uint64_t {
+        const char* text = std::getenv("APS5_SLEEP_CAP_MS");
+        if (text == nullptr) return 0;
+        const long millis = std::strtol(text, nullptr, 10);
+        if (millis <= 0 || millis > 60000) return 0;
+        static std::atomic<bool> announced{false};
+        if (!announced.exchange(true))
+            std::fprintf(stderr, "[sleep-cap] APS5_SLEEP_CAP_MS=%ld: guest sleeps longer than that end early\n", millis);
+        return static_cast<std::uint64_t>(millis) * 1000000ULL;
+    }();
+    return value;
+}
+
 static void TracedSleep(const void* caller, std::uint64_t nanos, bool cancellable) {
+    const std::uint64_t requested = nanos;
+    const std::uint64_t cap = SleepCapNanos();
+    if (cap != 0 && nanos > cap) nanos = cap;
     if (!SleepTraceEnabled()) {
         if (cancellable) CancellableSleep(nanos);
         else SleepUntilComplete(nanos);
@@ -636,7 +653,7 @@ static void TracedSleep(const void* caller, std::uint64_t nanos, bool cancellabl
     if (cancellable) CancellableSleep(nanos);
     else SleepUntilComplete(nanos);
     const std::uint64_t waited = TimedWait::NowNanos() - start;
-    TraceSleepSite(caller, nanos, waited, GetMonotonicNanos() - guestStart);
+    TraceSleepSite(caller, requested, waited, GetMonotonicNanos() - guestStart);
 }
 
 int APS5_VABI sceKernelUsleep_nid_postfix(KernelUseconds microseconds) {

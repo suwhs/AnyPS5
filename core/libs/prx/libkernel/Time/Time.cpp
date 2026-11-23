@@ -565,18 +565,24 @@ struct SleepSite {
 
 }  // namespace
 
-static void TraceSleepSite(const void* caller, std::uint64_t requestedNanos, std::uint64_t waitedNanos) {
+static void TraceSleepSite(const void* caller, std::uint64_t requestedNanos, std::uint64_t waitedNanos, std::uint64_t guestWaitedNanos) {
     static const bool enabled = std::getenv("APS5_TRACE_SLEEPS") != nullptr;
     if (!enabled) return;
-    if (waitedNanos >= 200000000ULL || requestedNanos >= 200000000ULL) {
+    const bool early = requestedNanos >= 200000ULL && waitedNanos + 200000ULL < requestedNanos;
+    if (waitedNanos >= 200000000ULL || requestedNanos >= 200000000ULL || early) {
         static std::mutex longMutex;
         static std::uint64_t started = 0;
+        static std::atomic<unsigned> printed{0};
         std::lock_guard lock(longMutex);
         const std::uint64_t now = GetMonotonicNanos();
         if (started == 0) started = now;
-        std::fprintf(stderr, "[sleep-long] t=%.1fs asked %.1f ms waited %.1f ms tid %lu %s\n",
-            static_cast<double>(now - started) / 1e9, static_cast<double>(requestedNanos) / 1e6,
-            static_cast<double>(waitedNanos) / 1e6, CurrentThreadIdForTrace(), DescribeCallSite(caller).c_str());
+        if (printed.fetch_add(1, std::memory_order_relaxed) < 400) {
+            const std::uint64_t raw = TimedWait::NowNanos();
+            std::fprintf(stderr, "[sleep-long] t=%.1fs asked %.3f ms waited %.3f ms guest %.3f ms pause %.3f s%s tid %lu %s\n",
+                static_cast<double>(now - started) / 1e9, static_cast<double>(requestedNanos) / 1e6,
+                static_cast<double>(waitedNanos) / 1e6, static_cast<double>(guestWaitedNanos) / 1e6,
+                static_cast<double>(raw - now) / 1e9, early ? " EARLY" : "", CurrentThreadIdForTrace(), DescribeCallSite(caller).c_str());
+        }
     }
     static std::mutex mutex;
     static std::unordered_map<std::string, SleepSite> sites;
@@ -618,9 +624,11 @@ static void TracedSleep(const void* caller, std::uint64_t nanos, bool cancellabl
         return;
     }
     const std::uint64_t start = TimedWait::NowNanos();
+    const std::uint64_t guestStart = GetMonotonicNanos();
     if (cancellable) CancellableSleep(nanos);
     else SleepUntilComplete(nanos);
-    TraceSleepSite(caller, nanos, TimedWait::NowNanos() - start);
+    const std::uint64_t waited = TimedWait::NowNanos() - start;
+    TraceSleepSite(caller, nanos, waited, GetMonotonicNanos() - guestStart);
 }
 
 int APS5_VABI sceKernelUsleep_nid_postfix(KernelUseconds microseconds) {

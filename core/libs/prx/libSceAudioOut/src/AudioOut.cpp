@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -308,6 +309,43 @@ static std::vector<float> prepareVibration(const Port& port, const void* data) {
     return pad;
 }
 
+enum class AudioOutApi {
+    Open,
+    Close,
+    Output,
+    Outputs,
+    SetVolume,
+    GetLastOutputTime,
+    GetPortState,
+    GetSystemState,
+    SetMainOutput,
+    SysOpen,
+    SysClose,
+    ExOpen,
+    ExClose,
+    Other,
+    Count,
+};
+
+const char* AudioOutApiName(AudioOutApi api) {
+    switch (api) {
+        case AudioOutApi::Open: return "open";
+        case AudioOutApi::Close: return "close";
+        case AudioOutApi::Output: return "output";
+        case AudioOutApi::Outputs: return "outputs";
+        case AudioOutApi::SetVolume: return "setVolume";
+        case AudioOutApi::GetLastOutputTime: return "getLastOutputTime";
+        case AudioOutApi::GetPortState: return "getPortState";
+        case AudioOutApi::GetSystemState: return "getSystemState";
+        case AudioOutApi::SetMainOutput: return "setMainOutput";
+        case AudioOutApi::SysOpen: return "sysOpen";
+        case AudioOutApi::SysClose: return "sysClose";
+        case AudioOutApi::ExOpen: return "exOpen";
+        case AudioOutApi::ExClose: return "exClose";
+        default: return "other";
+    }
+}
+
 struct AudioOutTraceState {
     std::atomic<std::uint64_t> calls{0};
     std::atomic<std::uint64_t> virtualCalls{0};
@@ -318,7 +356,26 @@ struct AudioOutTraceState {
     std::atomic<std::uint64_t> sleepTotalUs{0};
     std::atomic<std::uint64_t> sleepLongestUs{0};
     std::atomic<std::uint64_t> lastReportUs{0};
+    std::array<std::atomic<int>, 8> peakIn{};
+    std::array<std::atomic<int>, 8> peakOut{};
+    std::atomic<std::uint64_t> loudestIn{0};
+    std::atomic<std::uint64_t> loudestOut{0};
+    std::atomic<std::uint64_t> silentBuffers{0};
+    std::atomic<std::uint64_t> loudBuffers{0};
+    std::array<char, 65> pattern{};
+    std::uint32_t patternCount = 0;
+    const void* watchedBuffer = nullptr;
+    std::uint64_t watchedChecksum = 0;
+    std::uint64_t watchedAtUs = 0;
+    std::atomic<std::uint64_t> lateFills{0};
+    std::atomic<std::uint64_t> lateFillWorstUs{0};
+    std::atomic<std::uint64_t> prefixOnlyBuffers{0};
+    std::atomic<std::uint64_t> suffixOnlyBuffers{0};
+    std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(AudioOutApi::Count)> apiCalls{};
 };
+
+
+constexpr std::size_t peakChannels = 8;
 
 static bool AudioOutTraceEnabled() {
     static const bool enabled = std::getenv("APS5_TRACE_AUDIOOUT") != nullptr;
@@ -328,6 +385,10 @@ static bool AudioOutTraceEnabled() {
 static AudioOutTraceState& AudioOutTrace() {
     static AudioOutTraceState state;
     return state;
+}
+static void CountAudioOutApi(AudioOutApi api) {
+    if (!AudioOutTraceEnabled()) return;
+    AudioOutTrace().apiCalls[static_cast<std::size_t>(api)].fetch_add(1, std::memory_order_relaxed);
 }
 
 static void RecordLongest(std::atomic<std::uint64_t>& target, std::uint64_t value) {
@@ -369,6 +430,25 @@ static void RecordAudioOutCall(std::uint64_t startUs, bool virtualPort) {
     const std::uint64_t sleeps = state.sleeps.exchange(0, std::memory_order_relaxed);
     const std::uint64_t sleepTotalUs = state.sleepTotalUs.exchange(0, std::memory_order_relaxed);
     const std::uint64_t sleepLongestUs = state.sleepLongestUs.exchange(0, std::memory_order_relaxed);
+    for (std::size_t index = 0; index < static_cast<std::size_t>(AudioOutApi::Count); ++index) {
+        const auto calls = AudioOutTrace().apiCalls[index].exchange(0, std::memory_order_relaxed);
+        if (calls != 0) std::fprintf(stderr, "[audioout] api %s x%llu\n", AudioOutApiName(static_cast<AudioOutApi>(index)), static_cast<unsigned long long>(calls));
+    }
+    std::fprintf(stderr, "[audioout] levels in");
+    for (std::size_t channel = 0; channel < peakChannels; ++channel) std::fprintf(stderr, " %d", state.peakIn[channel].exchange(0, std::memory_order_relaxed));
+    std::fprintf(stderr, " (loudest %llu); out", static_cast<unsigned long long>(state.loudestIn.exchange(0, std::memory_order_relaxed)));
+    for (std::size_t channel = 0; channel < peakChannels; ++channel) std::fprintf(stderr, " %d", state.peakOut[channel].exchange(0, std::memory_order_relaxed));
+    std::fprintf(stderr, " (loudest %llu); buffers silent %llu / loud %llu\n", static_cast<unsigned long long>(state.loudestOut.exchange(0, std::memory_order_relaxed)),
+        static_cast<unsigned long long>(state.silentBuffers.exchange(0, std::memory_order_relaxed)),
+        static_cast<unsigned long long>(state.loudBuffers.exchange(0, std::memory_order_relaxed)));
+    state.pattern[state.patternCount] = 0;
+    std::fprintf(stderr, "[audioout] halves: prefix-only %llu, suffix-only %llu\n",
+        static_cast<unsigned long long>(state.prefixOnlyBuffers.exchange(0, std::memory_order_relaxed)),
+        static_cast<unsigned long long>(state.suffixOnlyBuffers.exchange(0, std::memory_order_relaxed)));
+    std::fprintf(stderr, "[audioout] pattern %s; late fills %llu (worst %llu us)\n", state.pattern.data(),
+        static_cast<unsigned long long>(state.lateFills.exchange(0, std::memory_order_relaxed)),
+        static_cast<unsigned long long>(state.lateFillWorstUs.exchange(0, std::memory_order_relaxed)));
+    state.patternCount = 0;
     std::fprintf(stderr,
         "[audioout] %llu calls in %.1f s (virtual %llu): inside %.3f s, longest %.1f ms, over 50 ms %llu; our sleeps %llu, longest asked %.1f ms, total %.3f s\n",
         static_cast<unsigned long long>(calls), static_cast<double>(now - last) / 1e6,
@@ -378,11 +458,100 @@ static void RecordAudioOutCall(std::uint64_t startUs, bool virtualPort) {
         static_cast<double>(sleepTotalUs) / 1e6);
 }
 
+static void RecordAudioLevels(const void* data, const Port& port, bool outgoing) {
+    if (!AudioOutTraceEnabled() || data == nullptr || port.channels == 0 || port.samplesNum == 0) return;
+    auto& state = AudioOutTrace();
+    const auto channels = std::min<std::uint32_t>(port.channels, peakChannels);
+    const bool isFloat = formatIsFloat(port.format);
+    std::array<int, peakChannels> peak{};
+    int loudest = 0;
+    for (std::uint32_t frame = 0; frame < port.samplesNum; ++frame) {
+        for (std::uint32_t channel = 0; channel < channels; ++channel) {
+            const auto index = static_cast<std::size_t>(frame) * port.channels + channel;
+            const int value = isFloat
+                ? static_cast<int>(std::fabs(static_cast<const float*>(data)[index]) * 32768.0f)
+                : std::abs(static_cast<int>(static_cast<const std::int16_t*>(data)[index]));
+            if (value > peak[channel]) peak[channel] = value;
+            if (value > loudest) loudest = value;
+        }
+    }
+    auto& target = outgoing ? state.peakOut : state.peakIn;
+    for (std::uint32_t channel = 0; channel < channels; ++channel) {
+        int previous = target[channel].load(std::memory_order_relaxed);
+        while (previous < peak[channel] && !target[channel].compare_exchange_weak(previous, peak[channel], std::memory_order_relaxed)) {
+        }
+    }
+    if (!outgoing && port.samplesNum >= 4) {
+        const bool isFloat = formatIsFloat(port.format);
+        const auto half = port.samplesNum / 2;
+        bool firstLoud = false;
+        bool secondLoud = false;
+        for (std::uint32_t frame = 0; frame < port.samplesNum; ++frame) {
+            for (std::uint32_t channel = 0; channel < channels; ++channel) {
+                const auto index = static_cast<std::size_t>(frame) * port.channels + channel;
+                const int value = isFloat
+                    ? (std::fabs(static_cast<const float*>(data)[index]) > 0.0f ? 1 : 0)
+                    : (static_cast<const std::int16_t*>(data)[index] != 0 ? 1 : 0);
+                if (value == 0) continue;
+                if (frame < half) firstLoud = true;
+                else secondLoud = true;
+            }
+        }
+        if (firstLoud && !secondLoud) state.prefixOnlyBuffers.fetch_add(1, std::memory_order_relaxed);
+        if (!firstLoud && secondLoud) state.suffixOnlyBuffers.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::uint64_t checksum = 0;
+    for (std::uint32_t frame = 0; frame < port.samplesNum; frame += 16) {
+        for (std::uint32_t channel = 0; channel < channels; ++channel) {
+            const auto index = static_cast<std::size_t>(frame) * port.channels + channel;
+            const auto* bytes = static_cast<const std::uint8_t*>(data) + index * bytesPerSample(port.format);
+            checksum = checksum * 1000003ULL + bytes[0] + (bytes[1] << 8);
+        }
+    }
+    if (!outgoing) {
+        (loudest == 0 ? state.silentBuffers : state.loudBuffers).fetch_add(1, std::memory_order_relaxed);
+        if (state.patternCount < state.pattern.size() - 1) state.pattern[state.patternCount++] = loudest == 0 ? 'S' : 'L';
+        if (state.watchedBuffer == data && checksum != state.watchedChecksum) {
+            const auto now = sceKernelGetProcessTime();
+            const auto late = now > state.watchedAtUs ? now - state.watchedAtUs : 0;
+            state.lateFills.fetch_add(1, std::memory_order_relaxed);
+            RecordLongest(state.lateFillWorstUs, late);
+        }
+        state.watchedBuffer = data;
+        state.watchedChecksum = checksum;
+        state.watchedAtUs = sceKernelGetProcessTime();
+    }
+    auto& loudestTarget = outgoing ? state.loudestOut : state.loudestIn;
+    std::uint64_t previousLoudest = loudestTarget.load(std::memory_order_relaxed);
+    while (previousLoudest < static_cast<std::uint64_t>(loudest) && !loudestTarget.compare_exchange_weak(previousLoudest, static_cast<std::uint64_t>(loudest), std::memory_order_relaxed)) {
+    }
+}
+
+static void DumpQueuedAudio(const void* data, std::uint32_t bytes) {
+    static const char* path = std::getenv("APS5_AUDIO_DUMP");
+    if (path == nullptr) return;
+    static FILE* file = std::fopen(path, "wb");
+    static std::uint64_t written = 0;
+    constexpr std::uint64_t limit = 96ULL * 1024ULL * 1024ULL;
+    if (file == nullptr || written >= limit) return;
+    const auto count = std::min<std::uint64_t>(bytes, limit - written);
+    written += std::fwrite(data, 1, static_cast<std::size_t>(count), file);
+    std::fflush(file);
+}
+
 static void sleepUs(std::unique_lock<std::mutex>& lock, std::uint64_t us) {
     RecordAudioOutSleep(us);
     lock.unlock();
     PreciseSleepUs(us);
     lock.lock();
+}
+
+static std::uint64_t AudioQueueTargetUs() {
+    const char* text = std::getenv("APS5_AUDIO_QUEUE_MS");
+    if (text == nullptr) return TARGET_LATENCY_US;
+    const long value = std::strtol(text, nullptr, 10);
+    if (value <= 0 || value > 5000) return TARGET_LATENCY_US;
+    return static_cast<std::uint64_t>(value) * 1000ULL;
 }
 
 static void queueAudio(Port& port, const void* data, std::unique_lock<std::mutex>& lock) {
@@ -410,27 +579,32 @@ static void queueAudio(Port& port, const void* data, std::unique_lock<std::mutex
         queueData = padFrames.data();
     } else {
         queueData = prepareBuffer(port, data, prepareBuf);
+        RecordAudioLevels(data, port, false);
         queueData = HostGainFilter(port.hostGain, HostVolumeGain_nid_no_patch(), queueData, formatIsFloat(port.format), port.samplesNum, static_cast<unsigned>(port.channels), prepareBuf);
+        RecordAudioLevels(queueData, port, true);
         queueSize = checkedBufferSize(port.samplesNum, static_cast<std::uint32_t>(port.channels), bytesPerSample(port.format));
     }
 
     const std::uint64_t bufferUs = port.freq != 0
         ? (1000000ULL * port.samplesNum) / port.freq
         : 0;
+    const auto targetUs = AudioQueueTargetUs();
     const std::uint32_t buffers = bufferUs != 0
-        ? static_cast<std::uint32_t>((TARGET_LATENCY_US + bufferUs - 1) / bufferUs)
+        ? static_cast<std::uint32_t>((targetUs + bufferUs - 1) / bufferUs)
         : 2u;
-    const std::uint32_t minQueued = queueSize * std::clamp(buffers, 2u, 16u);
+    const std::uint32_t minQueued = queueSize * std::clamp(buffers, 2u, 8192u);
+    const std::uint64_t drainTimeoutUs = targetUs == TARGET_LATENCY_US ? DRAIN_TIMEOUT_US : DRAIN_TIMEOUT_US + targetUs;
     const std::uint64_t waitStart = sceKernelGetProcessTime();
 
     while (SDL_GetQueuedAudioSize(port.device) > minQueued) {
-        if (sceKernelGetProcessTime() - waitStart > DRAIN_TIMEOUT_US) {
+        if (sceKernelGetProcessTime() - waitStart > drainTimeoutUs) {
             SDL_ClearQueuedAudio(port.device);
             break;
         }
         sleepUs(lock, DRAIN_SLEEP_US);
     }
 
+    DumpQueuedAudio(queueData, queueSize);
     if (SDL_QueueAudio(port.device, queueData, queueSize) < 0) {
         throw std::runtime_error(std::string("SDL_QueueAudio: ") + SDL_GetError());
     }
@@ -519,7 +693,7 @@ static int allocatePort(int type, std::uint32_t len, std::uint32_t freq, Format 
                 openDevice(port);
             }
             static const bool trace = std::getenv("APS5_TRACE_AUDIOOUT") != nullptr;
-            if (trace) std::fprintf(stderr, "[audioout] port %d: type %d, %u samples at %u Hz, format %d, device %u\n", i + 1, type, len, freq, static_cast<int>(format), static_cast<unsigned>(port.device));
+            if (trace) std::fprintf(stderr, "[audioout] port %d: type %d, %u samples at %u Hz, format %d, device %u (device gives %d Hz, format 0x%x, %u channels, %u samples)\n", i + 1, type, len, freq, static_cast<int>(format), static_cast<unsigned>(port.device), port.spec.freq, static_cast<unsigned>(port.spec.format), static_cast<unsigned>(port.spec.channels), static_cast<unsigned>(port.spec.samples));
             return i + 1;
         }
     }
@@ -558,6 +732,7 @@ int APS5_VABI sceAudioOutInit() {
 
 int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len,
     std::uint32_t freq, std::uint32_t param) {
+    CountAudioOutApi(AudioOutApi::Open);
     (void)userId;
     (void)index;
     if (!portTypeValid(type)) {
@@ -589,6 +764,7 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
 }
 
 int APS5_VABI sceAudioOutClose(int handle) {
+    CountAudioOutApi(AudioOutApi::Close);
     if (handle <= 0 || handle > PORTS_MAX) return -2144993277;
     std::lock_guard<std::mutex> outputLock(g_outputMutexes[handle - 1]);
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -603,6 +779,7 @@ int APS5_VABI sceAudioOutClose(int handle) {
 }
 
 int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) try {
+    CountAudioOutApi(AudioOutApi::Output);
     const AudioOutCall call;
     const std::uint64_t callStart = AudioOutTraceEnabled() ? sceKernelGetProcessTime() : 0;
     if (handle <= 0 || handle > PORTS_MAX) return -2144993277;
@@ -627,6 +804,7 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) try {
 }
 
 int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) try {
+    CountAudioOutApi(AudioOutApi::Outputs);
     const AudioOutCall call;
     const std::uint64_t callStart = AudioOutTraceEnabled() ? sceKernelGetProcessTime() : 0;
     if (param == nullptr || num == 0) {
@@ -673,6 +851,7 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
 }
 
 int APS5_VABI sceAudioOutSetVolume(int handle, std::uint32_t flag, int* vol) {
+    CountAudioOutApi(AudioOutApi::SetVolume);
     if (vol == nullptr) {
         return -2144993276;
     }
@@ -699,6 +878,7 @@ int APS5_VABI sceAudioOutSetVolume(int handle, std::uint32_t flag, int* vol) {
 }
 
 int APS5_VABI sceAudioOutGetLastOutputTime(int handle, std::uint64_t* outputTime) {
+    CountAudioOutApi(AudioOutApi::GetLastOutputTime);
     if (outputTime == nullptr) {
         return -2144993276;
     }
@@ -718,6 +898,7 @@ int APS5_VABI sceAudioOutGetLastOutputTime(int handle, std::uint64_t* outputTime
 }
 
 int APS5_VABI sceAudioOutGetPortState(int handle, AudioOutPortState* state) {
+    CountAudioOutApi(AudioOutApi::GetPortState);
     if (state == nullptr) {
         return -2144993276;
     }
@@ -771,6 +952,7 @@ int APS5_VABI sceAudioOutDeviceIdOpen(std::uint64_t deviceId, std::int32_t type,
 }
 
 int APS5_VABI sceAudioOutSysClose(int handle) {
+    CountAudioOutApi(AudioOutApi::SysClose);
     if (handle <= 0 || handle > PORTS_MAX) {
         throw std::runtime_error("sceAudioOutSysClose: handle " + std::to_string(handle) + " is not an open Sys port");
     }
@@ -810,6 +992,7 @@ int APS5_VABI sceAudioOutSysGetHdmiMonitorInfo(int type, void* info, std::uint32
 }
 
 int APS5_VABI sceAudioOutSysOpen(int userId, std::uint32_t mode) {
+    CountAudioOutApi(AudioOutApi::SysOpen);
     (void)userId;
     if (mode != SYS_OPEN_MODE_TRUEHD) {
         throw std::runtime_error("sceAudioOutSysOpen: mode " + std::to_string(mode) + " not supported");
@@ -838,6 +1021,7 @@ int APS5_VABI sceAudioOutSetMixLevelPadSpk(int handle, std::uint32_t mixLevel) {
 }
 
 int APS5_VABI sceAudioOutExClose(int handle) {
+    CountAudioOutApi(AudioOutApi::ExClose);
     if (handle <= 0 || handle > PORTS_MAX) {
         throw std::runtime_error("sceAudioOutExClose: handle " + std::to_string(handle) + " is not an open Ex port");
     }
@@ -880,6 +1064,7 @@ int APS5_VABI sceAudioOutExGetMonitorInfo(int type, int index, void* info, std::
 }
 
 int APS5_VABI sceAudioOutExOpen(int userId, std::uint32_t mode) {
+    CountAudioOutApi(AudioOutApi::ExOpen);
     (void)userId;
     if (mode > EX_OPEN_MODE_MAX || ((EX_OPEN_MODES >> mode) & 1) == 0) {
         return ERROR_EX_INVALID_MODE;

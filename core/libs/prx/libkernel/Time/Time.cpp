@@ -572,16 +572,24 @@ static void TraceSleepSite(const void* caller, std::uint64_t requestedNanos, std
     if (waitedNanos >= 200000000ULL || requestedNanos >= 200000000ULL || early) {
         static std::mutex longMutex;
         static std::uint64_t started = 0;
-        static std::atomic<unsigned> printed{0};
+        static std::atomic<unsigned> printedEarly{0};
+        static std::atomic<unsigned> printedLong{0};
         std::lock_guard lock(longMutex);
         const std::uint64_t now = GetMonotonicNanos();
         if (started == 0) started = now;
-        if (printed.fetch_add(1, std::memory_order_relaxed) < 400) {
+        const bool longSleep = waitedNanos >= 200000000ULL || requestedNanos >= 200000000ULL;
+        const bool wanted = longSleep ? printedLong.fetch_add(1, std::memory_order_relaxed) < 4000
+                                      : printedEarly.fetch_add(1, std::memory_order_relaxed) < 40;
+        if (wanted) {
             const std::uint64_t raw = TimedWait::NowNanos();
-            std::fprintf(stderr, "[sleep-long] t=%.1fs asked %.3f ms waited %.3f ms guest %.3f ms pause %.3f s%s tid %lu %s\n",
+            char name[24] = "";
+#ifndef _WIN32
+            pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+            std::fprintf(stderr, "[sleep-long] t=%.1fs asked %.3f ms waited %.3f ms guest %.3f ms pause %.3f s%s tid %lu %s %s\n",
                 static_cast<double>(now - started) / 1e9, static_cast<double>(requestedNanos) / 1e6,
                 static_cast<double>(waitedNanos) / 1e6, static_cast<double>(guestWaitedNanos) / 1e6,
-                static_cast<double>(raw - now) / 1e9, early ? " EARLY" : "", CurrentThreadIdForTrace(), DescribeCallSite(caller).c_str());
+                static_cast<double>(raw - now) / 1e9, early ? " EARLY" : "", CurrentThreadIdForTrace(), DescribeCallSite(caller).c_str(), name);
         }
     }
     static std::mutex mutex;

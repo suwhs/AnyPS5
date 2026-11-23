@@ -1682,6 +1682,15 @@ int APS5_VABI scePthreadRename(Pthread thread, const char* name) {
 #ifdef _WIN32
     SetThreadDescription(static_cast<HANDLE>(thread->nativeHandle), ThreadDescription(thread->name).c_str());
     ApplyJobAffinity(*thread, thread->nativeHandle);
+#else
+    if (thread->hostTid != 0) {
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/self/task/%d/comm", thread->hostTid);
+        if (std::FILE* comm = std::fopen(path, "w")) {
+            std::fwrite(thread->name.data(), 1, thread->name.size(), comm);
+            std::fclose(comm);
+        }
+    }
 #endif
     return SCE_OK;
 }

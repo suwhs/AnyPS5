@@ -26,6 +26,17 @@ ThreadState& State() {
 
 std::atomic<std::uint64_t> completions{0};
 
+std::uint64_t WakeableNanos() {
+    static const std::uint64_t value = []() -> std::uint64_t {
+        const char* text = std::getenv("APS5_WAKEABLE_SLEEP_MS");
+        if (text == nullptr) return MAX_WAKEABLE_NANOS;
+        const long millis = std::strtol(text, nullptr, 10);
+        if (millis <= 0 || millis > 1000) return MAX_WAKEABLE_NANOS;
+        return static_cast<std::uint64_t>(millis) * 1000000ULL;
+    }();
+    return value;
+}
+
 bool Enabled() {
     static const bool enabled = std::getenv("APS5_NO_SLEEP_WAKE") == nullptr;
     return enabled;
@@ -36,9 +47,9 @@ bool Enabled() {
 void Sleep(std::uint64_t nanos) {
     ThreadState& state = State();
     bool woken = false;
-    if (nanos != 0 && nanos <= MAX_WAKEABLE_NANOS && !state.sleeping && Enabled()) {
+    if (nanos != 0 && nanos <= WakeableNanos() && !state.sleeping && Enabled()) {
         if (TimedWait::NowNanos() - state.lastSleepEndNanos >= nanos) state.earlyWakes = 0;
-        if (state.earlyWakes < EARLY_WAKES_PER_RUN) {
+        if (nanos > MAX_WAKEABLE_NANOS || state.earlyWakes < EARLY_WAKES_PER_RUN) {
             state.sleeping = true;
             const bool early = TimedWait::SleepNanosUnlessChanged(nanos, completions, completions.load(std::memory_order_seq_cst));
             state.sleeping = false;
